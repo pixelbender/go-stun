@@ -1,6 +1,6 @@
 package turn
 
-import "stun"
+import "github.com/pixelbender/go-stun/stun"
 
 // STUN Attributes introduced by the RFC 5766 Section 14
 const (
