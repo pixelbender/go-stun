@@ -1,5 +1,7 @@
 # Golang STUN, TURN, ICE Protocol Implementation
 
+[![Build Status](https://travis-ci.org/pixelbender/go-stun.svg)](https://travis-ci.org/pixelbender/go-stun)
+
 There is no working release yet. Stay tuned.
 
 ## Roadmap
