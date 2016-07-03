@@ -5,11 +5,14 @@ import (
 	"io"
 )
 
+// ErrWrongFormat is the error returned by ReadMessage when data format is wrong.
 var ErrWrongFormat = errors.New("stun: wrong message format")
 
+// A Decoder reads and decodes STUN messages from the byte array.
 type Decoder struct {
 }
 
+// ReadMessage reads STUN messages from the byte array.
 func (dec *Decoder) ReadMessage(b []byte) (*Message, error) {
 	if len(b) < 20 {
 		return nil, io.EOF

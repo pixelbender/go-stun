@@ -5,6 +5,7 @@ import (
 	"hash/crc32"
 )
 
+// STUN message types introduced by the RFC 3489 Section 8.
 const (
 	BindingRequest       = uint16(0x0001)
 	BindingResponse      = uint16(0x0101)
@@ -14,8 +15,9 @@ const (
 	SharedSecretError    = uint16(0x0112)
 )
 
-var magicCookie = []byte{0x21, 0x12, 0xa4, 0x42}
+const magicCookie = uint32(0x2112a442)
 
+// Message represents a STUN message.
 type Message struct {
 	Type        uint16
 	Cookie      uint32
@@ -23,6 +25,7 @@ type Message struct {
 	Attributes  map[uint16]Attribute
 }
 
+// NewMessage creates a STUN message.
 func NewMessage(t uint16, attrs map[uint16]Attribute) *Message {
 	m := &Message{
 		Type:       t,
@@ -33,6 +36,8 @@ func NewMessage(t uint16, attrs map[uint16]Attribute) *Message {
 	return m
 }
 
+// Checksum calculates FINGERPRINT attribute value for the previous STUN message bytes
+// See RFC 5389 Section 15.5
 func Checksum(v []byte) uint32 {
 	return crc32.ChecksumIEEE(v) ^ 0x5354554e
 }
