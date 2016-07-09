@@ -2,13 +2,14 @@
 
 [![Build Status](https://travis-ci.org/pixelbender/go-stun.svg)](https://travis-ci.org/pixelbender/go-stun)
 [![Coverage Status](https://coveralls.io/repos/github/pixelbender/go-stun/badge.svg?branch=master)](https://coveralls.io/github/pixelbender/go-stun?branch=master)
+[![Go Report Card](https://goreportcard.com/badge/github.com/pixelbender/go-stun)](https://goreportcard.com/report/github.com/pixelbender/go-stun)
 [![GoDoc](https://godoc.org/github.com/pixelbender/go-stun?status.svg)](https://godoc.org/github.com/pixelbender/go-stun)
 
 There is no working release yet. Stay tuned.
 
 ## Roadmap
 
-- [ ] STUN Message Encoder/Decoder
+- [x] STUN Message Encoder/Decoder
 - [ ] STUN Server
 - [ ] STUN Message integrity check
 - [ ] ICE STUN Attributes

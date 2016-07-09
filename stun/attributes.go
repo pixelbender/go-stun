@@ -40,6 +40,7 @@ const (
 // Attribute is the interface that represents a STUN message attribute.
 type Attribute interface {
 	// Encode writes the attribute to the byte array.
+	// Returns io.ErrUnexpectedEOF error if the byte array length is not enough.
 	Encode(b []byte) (int, error)
 }
 
@@ -78,7 +79,7 @@ func (attr ChangeRequest) Encode(b []byte) (int, error) {
 // UnknownAttributes represents the UNKNOWN-ATTRIBUTES attribute
 type UnknownAttributes []uint16
 
-// Encode writes the attribute to the byte array.
+// Encode writes the attribute to the byte array.F
 func (attr UnknownAttributes) Encode(b []byte) (int, error) {
 	n := len(attr) << 1
 	if len(b) < n {

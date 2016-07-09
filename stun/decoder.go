@@ -1,57 +1,37 @@
 package stun
 
 import (
-	"errors"
+	"bufio"
 	"io"
 )
 
-// ErrWrongFormat is the error returned by ReadMessage when data format is wrong.
-var ErrWrongFormat = errors.New("stun: wrong message format")
-
-// A Decoder reads and decodes STUN messages from the byte array.
+// A Decoder reads and decodes STUN message from an input stream.
 type Decoder struct {
+	buf *bufio.Reader
 }
 
-// ReadMessage reads STUN messages from the byte array.
-func (dec *Decoder) ReadMessage(b []byte) (*Message, error) {
-	if len(b) < 20 {
-		return nil, io.EOF
+// NewDecoder returns a new decoder that reads from r.
+func NewDecoder(r io.Reader) *Decoder {
+	if buf, ok := r.(*bufio.Reader); ok {
+		return &Decoder{buf}
 	}
-	n, p := getInt16(b[2:]), b[20:]
-	if len(p) < n {
-		return nil, io.EOF
-	}
-	msg := &Message{
-		Type:       getUint16(b),
-		Cookie:     getUint32(b[4:]),
-		Attributes: make(map[uint16]Attribute),
-	}
-	copy(msg.Transaction[:], b[8:20])
-	for len(p) > 4 {
-		at, an := getUint16(p), getInt16(p[2:])
-		m := an
-		if mod := n & 3; mod != 0 {
-			m += 4 - mod
-		}
-		if p = p[4:]; len(p) < m {
-			return nil, ErrWrongFormat
-		}
-		msg.Attributes[at], p = RawAttribute(p[:an]), p[an:]
-	}
-
-	// TODO: check message integrity + fingerprint
-
-	return msg, nil
+	return &Decoder{bufio.NewReaderSize(r, bufferSize)}
 }
 
-func getInt16(b []byte) int {
-	return int(b[1]) | int(b[0])<<8
-}
-
-func getUint16(b []byte) uint16 {
-	return uint16(b[1]) | uint16(b[0])<<8
-}
-
-func getUint32(b []byte) uint32 {
-	return uint32(b[3]) | uint32(b[2])<<8 | uint32(b[1])<<16 | uint32(b[0])<<24
+// Decode reads STUN message from the stream.
+func (dec *Decoder) Decode() (*Message, error) {
+	b, err := dec.buf.Peek(20)
+	if err != nil {
+		return nil, err
+	}
+	n := getInt16(b[2:]) + 20
+	if b, err = dec.buf.Peek(n); err != nil {
+		return nil, err
+	}
+	msg, err := ReadMessage(b)
+	if err != nil {
+		return nil, err
+	}
+	dec.buf.Discard(n)
+	return msg, err
 }
