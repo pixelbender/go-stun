@@ -3,32 +3,25 @@ package stun
 import (
 	"fmt"
 	"net"
-	"sync"
 	"time"
 )
 
-// A ResponseWriter interface is used by a STUN handler to construct a STUN response.
-type ResponseWriter interface {
-	WriteMessage(*Message) error
-}
-
-// A Handler responds to a STUN request.
+// A Handler handles a STUN message.
 type Handler interface {
-	ServeSTUN(w ResponseWriter, r *Message)
+	ServeSTUN(tr *Transaction)
 }
 
 // The HandlerFunc type is an adapter to allow the use of ordinary functions as STUN handlers.
-type HandlerFunc func(w ResponseWriter, r *Message)
+type HandlerFunc func(tr *Transaction)
 
-// ServeSTUN calls f(w, r).
-func (f HandlerFunc) ServeSTUN(w ResponseWriter, r *Message) {
-	f(w, r)
+// ServeSTUN calls f(tr).
+func (f HandlerFunc) ServeSTUN(tr *Transaction) {
+	f(tr)
 }
 
 // Server represents a STUN server.
 type Server struct {
 	Handler Handler
-	mutex   sync.Mutex
 }
 
 // ListenAndServe listens on the network address and calls handler to serve requests.
@@ -50,7 +43,7 @@ func (srv *Server) ListenAndServe(network, addr string) error {
 	return fmt.Errorf("stun: listen unsupported network %v", network)
 }
 
-// ServePacket accepts incoming STUN requests on the packet-oriented network listener and calls handler to serve requests.
+// ServePacket receives incoming packets on the packet-oriented network listener and calls handler to serve STUN requests.
 func (srv *Server) ServePacket(l net.PacketConn) error {
 	buf := make([]byte, bufferSize)
 	for {
@@ -58,15 +51,15 @@ func (srv *Server) ServePacket(l net.PacketConn) error {
 		if err != nil {
 			return err
 		}
-		msg, err := ReadMessage(buf[:n])
+		msg, err := DecodeMessage(buf[:n])
 		if err != nil {
 			return err
 		}
-		go srv.serveMessage(&clientConn{l, addr}, msg)
+		go srv.ServeSTUN(&Transaction{netPacketConn(l, addr), msg})
 	}
 }
 
-// Serve accepts incoming STUN requests on the listener and calls handler to serve requests.
+// Serve accepts incoming connection on the listener and calls handler to serve STUN requests.
 func (srv *Server) Serve(l net.Listener) error {
 	for {
 		c, err := l.Accept()
@@ -77,45 +70,79 @@ func (srv *Server) Serve(l net.Listener) error {
 			}
 			return err
 		}
-		go srv.serveConn(NewConn(c))
+		go srv.serveConn(c)
 	}
 }
 
-func (srv *Server) serveConn(conn *Conn) error {
-	defer conn.Close()
+func (srv *Server) serveConn(conn net.Conn) error {
+	c := NewConn(conn)
+	defer c.Close()
 	for {
-		msg, err := conn.ReadMessage()
+		msg, err := c.ReadMessage()
 		if err != nil {
 			return err
 		}
-		srv.serveMessage(conn, msg)
+		srv.ServeSTUN(&Transaction{c, msg})
 	}
 }
 
-func (srv *Server) serveMessage(w ResponseWriter, r *Message) {
+// ServeSTUN handles the STUN message.
+func (srv *Server) ServeSTUN(tr *Transaction) {
 	if srv.Handler != nil {
-		srv.Handler.ServeSTUN(w, r)
+		srv.Handler.ServeSTUN(tr)
 	}
 }
 
-type clientConn struct {
+type clientConn interface {
+	WriteMessage(msg *Message) error
+	RemoteAddr() net.Addr
+	Close() error
+}
+
+// A Transaction represents an incoming STUN transaction.
+type Transaction struct {
+	clientConn
+	Message *Message
+}
+
+func (tr *Transaction) WriteResponse(t uint16, attrs map[uint16]Attribute) error {
+	res := &Message{
+		Type:        t,
+		Cookie:      tr.Message.Cookie,
+		Transaction: tr.Message.Transaction,
+		Attributes:  attrs,
+	}
+	return tr.WriteMessage(res)
+}
+
+type packetConn struct {
 	net.PacketConn
 	addr net.Addr
 }
 
-func (c *clientConn) WriteMessage(msg *Message) error {
+func netPacketConn(l net.PacketConn, addr net.Addr) *packetConn {
+	return &packetConn{l, addr}
+}
+
+func (pc *packetConn) RemoteAddr() net.Addr {
+	return pc.addr
+}
+
+func (pc *packetConn) WriteMessage(msg *Message) error {
+	// TODO: buffer pool
+
 	buf := make([]byte, bufferSize)
 	n, err := msg.Encode(buf)
 	if err != nil {
 		return err
 	}
-	_, err = c.WriteTo(buf[:n], c.addr)
+	_, err = pc.WriteTo(buf[:n], pc.addr)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func (c *clientConn) RemoteAddr() net.Addr {
-	return c.addr
+func (pc *packetConn) Close() error {
+	return nil
 }

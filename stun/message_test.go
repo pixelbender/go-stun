@@ -14,7 +14,7 @@ func TestMessageDecode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode error %v", err)
 		}
-		m, err := ReadMessage(b)
+		m, err := DecodeMessage(b)
 		if err != nil {
 			t.Fatalf("read error %v", err)
 		}

@@ -2,7 +2,7 @@ package turn
 
 import "github.com/pixelbender/go-stun/stun"
 
-// STUN Attributes introduced by the RFC 5766 Section 14
+// STUN Attributes introduced by the RFC 5766 Section 14.
 const (
 	AttrChannelNumber      = uint16(0x000c)
 	AttrLifeTime           = uint16(0x000d)
@@ -15,29 +15,41 @@ const (
 	AttrReservationToken   = uint16(0x0022)
 )
 
-// STUN Errors introduced by the RFC 5766 Section 15
+// STUN Errors introduced by the RFC 5766 Section 15.
 const (
-	ErrForbidden                    = 403
-	ErrAllocationMismatch           = 437
-	ErrWrongCredentials             = 441
-	ErrUnsupportedTransportProtocol = 442
-	ErrAllocationQuotaReached       = 486
-	ErrInsufficientCapacity         = 508
+	StatusForbidden                    = 403
+	StatusAllocationMismatch           = 437
+	StatusWrongCredentials             = 441
+	StatusUnsupportedTransportProtocol = 442
+	StatusAllocationQuotaReached       = 486
+	StatusInsufficientCapacity         = 508
 )
 
-var errorText = map[int]string{
-	ErrForbidden:                    "Forbidden",
-	ErrAllocationMismatch:           "Allocation Mismatch",
-	ErrWrongCredentials:             "Wrong Credentials",
-	ErrUnsupportedTransportProtocol: "Unsupported Transport Protocol",
-	ErrAllocationQuotaReached:       "Allocation Quota Reached",
-	ErrInsufficientCapacity:         "Insufficient Capacity",
+var statusText = map[int]string{
+	StatusForbidden:                    "Forbidden",
+	StatusAllocationMismatch:           "Allocation Mismatch",
+	StatusWrongCredentials:             "Wrong Credentials",
+	StatusUnsupportedTransportProtocol: "Unsupported Transport Protocol",
+	StatusAllocationQuotaReached:       "Allocation Quota Reached",
+	StatusInsufficientCapacity:         "Insufficient Capacity",
 }
 
-// ErrorText returns a reason phrase text for the STUN error code. It returns the empty string if the code is unknown.
-func ErrorText(code int) string {
-	if r, ok := errorText[code]; ok {
+// StatusText returns a reason phrase text for the STUN status code. It returns the empty string if the code is unknown.
+func StatusText(code int) string {
+	if r, ok := statusText[code]; ok {
 		return r
 	}
-	return stun.ErrorText(code)
+	return stun.StatusText(code)
+}
+
+func init() {
+	stun.Register(AttrChannelNumber, "CHANNEL-NUMBER", nil)
+	stun.Register(AttrLifeTime, "LIFETIME", nil)
+	stun.Register(AttrXorPeerAddress, "XOR-PEER-ADDRESS", stun.XorAddressCodec)
+	stun.Register(AttrData, "DATA", nil)
+	stun.Register(AttrXorRelayedAddress, "XOR-RELAYED-ADDRESS", stun.XorAddressCodec)
+	stun.Register(AttrEvenPort, "EVEN-PORT", nil)
+	stun.Register(AttrRequestedTransport, "REQUESTED-TRANSPORT", nil)
+	stun.Register(AttrDontFragment, "DONT-FRAGMENT", nil)
+	stun.Register(AttrReservationToken, "RESERVATION-TOKEN", nil)
 }

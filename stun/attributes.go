@@ -1,7 +1,12 @@
 package stun
 
 import (
+	"encoding/hex"
+	"fmt"
 	"io"
+	"reflect"
+	"strconv"
+	"unicode/utf8"
 )
 
 // Attributes introduced by the RFC 5389 Section 18.2.
@@ -19,74 +24,121 @@ const (
 	AttrAlternateServer   = uint16(0x8023)
 )
 
-// Attributes introduced by the RFC 3489 Section 11.2 except listed in RFC 5389.
-const (
-	AttrResponseAddress = uint16(0x0002)
-	AttrChangeRequest   = uint16(0x0003)
-	AttrSourceAddress   = uint16(0x0004)
-	AttrChangedAddress  = uint16(0x0005)
-	AttrPassword        = uint16(0x0007)
-	AttrReflectedFrom   = uint16(0x000b)
-)
-
 // Attributes introduced by the RFC 5780 Section 7.
 const (
+	AttrChangeRequest  = uint16(0x0003)
 	AttrPadding        = uint16(0x0026)
 	AttrResponsePort   = uint16(0x0027)
 	AttrResponseOrigin = uint16(0x802b)
 	AttrOtherAddress   = uint16(0x802c)
 )
 
-// Attribute is the interface that represents a STUN message attribute.
-type Attribute interface {
-	// Encode writes the attribute to the byte array.
-	// Returns io.ErrUnexpectedEOF error if the byte array length is not enough.
-	Encode(b []byte) (int, error)
-}
-
-// RawAttribute is the byte array representation of message attribute.
-type RawAttribute []byte
-
-// Encode copies the raw attribute to the byte array.
-func (attr RawAttribute) Encode(b []byte) (int, error) {
-	if len(b) < len(attr) {
-		return 0, io.ErrUnexpectedEOF
-	}
-	return copy(b, attr), nil
-}
-
-// ChangeRequest represents the CHANGE-REQUEST attribute
-type ChangeRequest uint8
-
-// ChangeRequest flags
+// Attributes introduced by the RFC 3489 Section 11.2 except listed above.
 const (
-	ChangeIP   = ChangeRequest(0x04)
-	ChangePort = ChangeRequest(0x02)
+	AttrResponseAddress = uint16(0x0002)
+	AttrSourceAddress   = uint16(0x0004)
+	AttrChangedAddress  = uint16(0x0005)
+	AttrPassword        = uint16(0x0007)
+	AttrReflectedFrom   = uint16(0x000b)
 )
 
-// Encode writes the attribute to the byte array.
-func (attr ChangeRequest) Encode(b []byte) (int, error) {
-	if len(b) < 4 {
-		return 0, io.ErrUnexpectedEOF
-	}
-	b[0] = 0
-	b[1] = 0
-	b[2] = 0
-	b[4] = byte(attr)
-	return 4, nil
+// Attribute is the interface that represents a STUN message attribute.
+type Attribute interface {
 }
 
-// UnknownAttributes represents the UNKNOWN-ATTRIBUTES attribute
-type UnknownAttributes []uint16
+// AttributeCodec interface represents a STUN attribute encoder/decoder.
+type AttributeCodec interface {
+	Encode(attr Attribute, b []byte) (int, error)
+	Decode(b []byte) (Attribute, error)
+}
 
-// Encode writes the attribute to the byte array.F
-func (attr UnknownAttributes) Encode(b []byte) (int, error) {
-	n := len(attr) << 1
-	if len(b) < n {
-		return 0, io.ErrUnexpectedEOF
+type attrRegistry struct {
+	name  string
+	codec AttributeCodec
+}
+
+var registry = make(map[uint16]*attrRegistry)
+
+func getAttributeCodec(at uint16) AttributeCodec {
+	if it, ok := registry[at]; ok {
+		return it.codec
 	}
-	for i, it := range attr {
-		putUint16(b[i<<1:], it)
+	return nil
+}
+
+func getAttributeName(at uint16) string {
+	if it, ok := registry[at]; ok {
+		return it.name
 	}
-	return n, nil
+	return strconv.FormatInt(int(at), 16)
+}
+
+func Register(at uint16, name string, codec AttributeCodec) {
+	if codec == nil {
+		codec = defaultCodec
+	}
+	registry[at] = &attrRegistry{name, codec}
+}
+
+// bytesAttribute is raw bytes representation of a message attribute.
+type bytesAttribute []byte
+
+func (ba bytesAttribute) String() string {
+	if utf8.Valid(ba) {
+		return string(ba)
+	}
+	return hex.EncodeToString(ba)
+}
+
+type bytesCodec struct{}
+
+func (codec bytesCodec) Encode(attr Attribute, b []byte) (int, error) {
+	switch c := attr.(type) {
+	case []byte:
+		if len(b) < len(c) {
+			return 0, io.ErrUnexpectedEOF
+		}
+		return copy(b, c), nil
+	case string:
+		if len(b) < len(c) {
+			return 0, io.ErrUnexpectedEOF
+		}
+		return copy(b, c), nil
+	}
+	return 0, fmt.Errorf("stun: unsupported attribute type: %v", reflect.TypeOf(attr))
+}
+
+func (codec bytesCodec) Decode(b []byte) (Attribute, error) {
+	return bytesAttribute(b), nil
+}
+
+var defaultCodec bytesCodec
+
+func init() {
+	// Attributes introduced by the RFC 5389 Section 18.2.
+	Register(AttrMappedAddress, "MAPPED-ADDRESS", AddressCodec)
+	Register(AttrXorMappedAddress, "XOR-MAPPED-ADDRESS", XorAddressCodec)
+	Register(AttrUsername, "USERNAME", nil)
+	Register(AttrMessageIntegrity, "MESSAGE-INTEGRITY", nil)
+	Register(AttrFingerprint, "FINGERPRINT", nil)
+	Register(AttrErrorCode, "ERROR-CODE", defaultErrorCodec)
+	Register(AttrRealm, "REALM", nil)
+	Register(AttrNonce, "NONCE", nil)
+	Register(AttrUnknownAttributes, "UNKNOWN-ATTRIBUTES", nil)
+	Register(AttrSoftware, "SOFTWARE", nil)
+	Register(AttrAlternateServer, "ALTERNATE-SERVER", AddressCodec)
+
+	// Attributes introduced by the RFC 5780 Section 7.
+	Register(AttrChangeRequest, "CHANGE-REQUEST", nil)
+	Register(AttrPadding, "PADDING", nil)
+	Register(AttrResponsePort, "RESPONSE-PORT", nil)
+	Register(AttrResponseOrigin, "RESPONSE-ORIGIN", AddressCodec)
+	Register(AttrOtherAddress, "OTHER-ADDRESS", AddressCodec)
+
+	// Attributes introduced by the RFC 3489 Section 11.2 except listed above.
+	Register(AttrResponseAddress, "RESPONSE-ADDRESS", AddressCodec)
+	Register(AttrSourceAddress, "SOURCE-ADDRESS", AddressCodec)
+	Register(AttrChangedAddress, "CHANGED-ADDRESS", AddressCodec)
+	Register(AttrPassword, "PASSWORD", nil)
+	Register(AttrReflectedFrom, "REFLECTED-FROM", AddressCodec)
 }
