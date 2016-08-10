@@ -1,30 +1,34 @@
 package stun
 
 import (
+	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"time"
 )
 
 // A Handler handles a STUN message.
 type Handler interface {
-	ServeSTUN(tr *Transaction)
+	ServeSTUN(tx *Transaction)
 }
 
 // The HandlerFunc type is an adapter to allow the use of ordinary functions as STUN handlers.
-type HandlerFunc func(tr *Transaction)
+type HandlerFunc func(tx *Transaction)
 
-// ServeSTUN calls f(tr).
-func (f HandlerFunc) ServeSTUN(tr *Transaction) {
-	f(tr)
+// ServeSTUN calls f(tx).
+func (f HandlerFunc) ServeSTUN(tx *Transaction) {
+	f(tx)
 }
 
 // Server represents a STUN server.
 type Server struct {
 	Handler Handler
+	Codec   *MessageCodec
 }
 
 // ListenAndServe listens on the network address and calls handler to serve requests.
+// Accepted connections are configured to enable TCP keep-alives.
 func (srv *Server) ListenAndServe(network, addr string) error {
 	switch network {
 	case "tcp", "tcp4", "tcp6":
@@ -32,7 +36,7 @@ func (srv *Server) ListenAndServe(network, addr string) error {
 		if err != nil {
 			return err
 		}
-		return srv.Serve(l)
+		return srv.Serve(tcpKeepAliveListener{l.(*net.TCPListener)})
 	case "udp", "udp4", "udp6":
 		l, err := net.ListenPacket(network, addr)
 		if err != nil {
@@ -43,7 +47,24 @@ func (srv *Server) ListenAndServe(network, addr string) error {
 	return fmt.Errorf("stun: listen unsupported network %v", network)
 }
 
+// ListenAndServeTLS listens on the network address secured by TLS and calls handler to serve requests.
+// Accepted connections are configured to enable TCP keep-alives.
+func (srv *Server) ListenAndServeTLS(network, addr, certFile, keyFile string) error {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return err
+	}
+	config := &tls.Config{Certificates: []tls.Certificate{cert}}
+	l, err := net.Listen(network, addr)
+	if err != nil {
+		return err
+	}
+	l = tls.NewListener(tcpKeepAliveListener{l.(*net.TCPListener)}, config)
+	return srv.Serve(l)
+}
+
 // ServePacket receives incoming packets on the packet-oriented network listener and calls handler to serve STUN requests.
+// Multiple goroutines may invoke ServePacket on the same PacketConn simultaneously.
 func (srv *Server) ServePacket(l net.PacketConn) error {
 	buf := make([]byte, bufferSize)
 	for {
@@ -51,15 +72,16 @@ func (srv *Server) ServePacket(l net.PacketConn) error {
 		if err != nil {
 			return err
 		}
-		msg, err := DecodeMessage(buf[:n])
+		msg, err := srv.Codec.Decode(buf[:n])
 		if err != nil {
-			return err
+			continue
 		}
-		go srv.ServeSTUN(&Transaction{netPacketConn(l, addr), msg})
+		srv.serveMessage(&packetWriter{l, addr, srv.Codec}, msg)
 	}
 }
 
 // Serve accepts incoming connection on the listener and calls handler to serve STUN requests.
+// Multiple goroutines may invoke Serve on the same Listener simultaneously.
 func (srv *Server) Serve(l net.Listener) error {
 	for {
 		c, err := l.Accept()
@@ -75,74 +97,98 @@ func (srv *Server) Serve(l net.Listener) error {
 }
 
 func (srv *Server) serveConn(conn net.Conn) error {
-	c := NewConn(conn)
+	c := NewConn(conn, srv.Codec)
 	defer c.Close()
 	for {
 		msg, err := c.ReadMessage()
 		if err != nil {
 			return err
 		}
-		srv.ServeSTUN(&Transaction{c, msg})
+		srv.serveMessage(c, msg)
 	}
 }
 
-// ServeSTUN handles the STUN message.
-func (srv *Server) ServeSTUN(tr *Transaction) {
+func (srv *Server) serveMessage(conn transConn, msg *Message) {
 	if srv.Handler != nil {
-		srv.Handler.ServeSTUN(tr)
+		srv.Handler.ServeSTUN(&Transaction{conn, msg})
 	}
-}
-
-type clientConn interface {
-	WriteMessage(msg *Message) error
-	RemoteAddr() net.Addr
-	Close() error
 }
 
 // A Transaction represents an incoming STUN transaction.
 type Transaction struct {
-	clientConn
+	c       transConn
 	Message *Message
 }
 
-func (tr *Transaction) WriteResponse(t uint16, attrs map[uint16]Attribute) error {
-	res := &Message{
-		Type:        t,
-		Cookie:      tr.Message.Cookie,
-		Transaction: tr.Message.Transaction,
-		Attributes:  attrs,
-	}
-	return tr.WriteMessage(res)
+// WriteResponse writes STUN response within the transaction.
+func (tx *Transaction) WriteResponse(m uint16, attrs Attributes) error {
+	return tx.WriteMessage(&Message{
+		Method:     tx.Message.Method | m,
+		Attributes: attrs,
+	})
 }
 
-type packetConn struct {
+// WriteMessage writes STUN message within the transaction.
+func (tx *Transaction) WriteMessage(msg *Message) error {
+	m := tx.Message
+	msg.Transaction = m.Transaction
+	msg.Key = m.Key
+	return tx.c.WriteMessage(msg)
+}
+
+// LocalAddr returns the local network address.
+func (tx *Transaction) LocalAddr() net.Addr {
+	return tx.c.LocalAddr()
+}
+
+// RemoteAddr returns the remote network address.
+func (tx *Transaction) RemoteAddr() net.Addr {
+	return tx.c.RemoteAddr()
+}
+
+type transConn interface {
+	io.Writer
+	LocalAddr() net.Addr
+	RemoteAddr() net.Addr
+	WriteMessage(msg *Message) error
+}
+
+type packetWriter struct {
 	net.PacketConn
-	addr net.Addr
+	addr  net.Addr
+	codec *MessageCodec
 }
 
-func netPacketConn(l net.PacketConn, addr net.Addr) *packetConn {
-	return &packetConn{l, addr}
+func (w *packetWriter) RemoteAddr() net.Addr {
+	return w.addr
 }
 
-func (pc *packetConn) RemoteAddr() net.Addr {
-	return pc.addr
+func (w *packetWriter) Write(b []byte) (int, error) {
+	return w.WriteTo(b, w.addr)
 }
 
-func (pc *packetConn) WriteMessage(msg *Message) error {
-	// TODO: buffer pool
-
-	buf := make([]byte, bufferSize)
-	n, err := msg.Encode(buf)
+func (w *packetWriter) WriteMessage(msg *Message) error {
+	b := make([]byte, bufferSize)
+	n, err := w.codec.Encode(msg, b)
 	if err != nil {
 		return err
 	}
-	_, err = pc.WriteTo(buf[:n], pc.addr)
-	if err != nil {
+	if _, err = w.Write(b[:n]); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (pc *packetConn) Close() error {
-	return nil
+type tcpKeepAliveListener struct {
+	*net.TCPListener
+}
+
+func (l tcpKeepAliveListener) Accept() (net.Conn, error) {
+	c, err := l.AcceptTCP()
+	if err != nil {
+		return nil, err
+	}
+	c.SetKeepAlive(true)
+	c.SetKeepAlivePeriod(time.Minute)
+	return c, nil
 }

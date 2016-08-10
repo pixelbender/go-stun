@@ -1,12 +1,9 @@
 package stun
 
 import (
-	"encoding/hex"
 	"fmt"
 	"io"
 	"reflect"
-	"strconv"
-	"unicode/utf8"
 )
 
 // Attributes introduced by the RFC 5389 Section 18.2.
@@ -15,13 +12,13 @@ const (
 	AttrXorMappedAddress  = uint16(0x0020)
 	AttrUsername          = uint16(0x0006)
 	AttrMessageIntegrity  = uint16(0x0008)
-	AttrFingerprint       = uint16(0x8028)
 	AttrErrorCode         = uint16(0x0009)
 	AttrRealm             = uint16(0x0014)
 	AttrNonce             = uint16(0x0015)
 	AttrUnknownAttributes = uint16(0x000a)
 	AttrSoftware          = uint16(0x8022)
 	AttrAlternateServer   = uint16(0x8023)
+	AttrFingerprint       = uint16(0x8028)
 )
 
 // Attributes introduced by the RFC 5780 Section 7.
@@ -42,58 +39,44 @@ const (
 	AttrReflectedFrom   = uint16(0x000b)
 )
 
-// Attribute is the interface that represents a STUN message attribute.
-type Attribute interface {
+// AttrCodec interface represents a STUN attribute encoder/decoder.
+type AttrCodec interface {
+	Encode(msg *Message, v interface{}, b []byte) (int, error)
+	Decode(msg *Message, b []byte) (interface{}, error)
 }
 
-// AttributeCodec interface represents a STUN attribute encoder/decoder.
-type AttributeCodec interface {
-	Encode(attr Attribute, b []byte) (int, error)
-	Decode(b []byte) (Attribute, error)
+var attrCodecs = map[uint16]AttrCodec{
+	AttrMappedAddress:     AddrCodec,
+	AttrXorMappedAddress:  XorAddrCodec,
+	AttrUsername:          DefaultAttrCodec,
+	AttrMessageIntegrity:  DefaultAttrCodec,
+	AttrErrorCode:         errorCodec{},
+	AttrRealm:             DefaultAttrCodec,
+	AttrNonce:             DefaultAttrCodec,
+	AttrUnknownAttributes: nil,
+	AttrSoftware:          DefaultAttrCodec,
+	AttrAlternateServer:   AddrCodec,
+	AttrFingerprint:       uintCodec{},
+	AttrChangeRequest:     uintCodec{},
+	AttrPadding:           DefaultAttrCodec,
+	AttrResponsePort:      nil,
+	AttrResponseOrigin:    AddrCodec,
+	AttrOtherAddress:      AddrCodec,
+	AttrResponseAddress:   AddrCodec,
+	AttrSourceAddress:     AddrCodec,
+	AttrChangedAddress:    AddrCodec,
+	AttrPassword:          DefaultAttrCodec,
+	AttrReflectedFrom:     AddrCodec,
 }
 
-type attrRegistry struct {
-	name  string
-	codec AttributeCodec
-}
+// DefaultAttrCodec decodes a STUN attribute as []byte.
+// Encodes []byte or string using copy.
+var DefaultAttrCodec attrCodec
 
-var registry = make(map[uint16]*attrRegistry)
+type attrCodec struct{}
 
-func getAttributeCodec(at uint16) AttributeCodec {
-	if it, ok := registry[at]; ok {
-		return it.codec
-	}
-	return nil
-}
-
-func getAttributeName(at uint16) string {
-	if it, ok := registry[at]; ok {
-		return it.name
-	}
-	return strconv.FormatInt(int(at), 16)
-}
-
-func Register(at uint16, name string, codec AttributeCodec) {
-	if codec == nil {
-		codec = defaultCodec
-	}
-	registry[at] = &attrRegistry{name, codec}
-}
-
-// bytesAttribute is raw bytes representation of a message attribute.
-type bytesAttribute []byte
-
-func (ba bytesAttribute) String() string {
-	if utf8.Valid(ba) {
-		return string(ba)
-	}
-	return hex.EncodeToString(ba)
-}
-
-type bytesCodec struct{}
-
-func (codec bytesCodec) Encode(attr Attribute, b []byte) (int, error) {
-	switch c := attr.(type) {
+func (attrCodec) Encode(msg *Message, v interface{}, b []byte) (int, error) {
+	switch c := v.(type) {
 	case []byte:
 		if len(b) < len(c) {
 			return 0, io.ErrUnexpectedEOF
@@ -105,40 +88,37 @@ func (codec bytesCodec) Encode(attr Attribute, b []byte) (int, error) {
 		}
 		return copy(b, c), nil
 	}
-	return 0, fmt.Errorf("stun: unsupported attribute type: %v", reflect.TypeOf(attr))
+	return 0, errUnsupportedAttr{reflect.TypeOf(v)}
 }
 
-func (codec bytesCodec) Decode(b []byte) (Attribute, error) {
-	return bytesAttribute(b), nil
+func (attrCodec) Decode(msg *Message, b []byte) (interface{}, error) {
+	return b, nil
 }
 
-var defaultCodec bytesCodec
+type errUnsupportedAttr struct {
+	reflect.Type
+}
 
-func init() {
-	// Attributes introduced by the RFC 5389 Section 18.2.
-	Register(AttrMappedAddress, "MAPPED-ADDRESS", AddressCodec)
-	Register(AttrXorMappedAddress, "XOR-MAPPED-ADDRESS", XorAddressCodec)
-	Register(AttrUsername, "USERNAME", nil)
-	Register(AttrMessageIntegrity, "MESSAGE-INTEGRITY", nil)
-	Register(AttrFingerprint, "FINGERPRINT", nil)
-	Register(AttrErrorCode, "ERROR-CODE", defaultErrorCodec)
-	Register(AttrRealm, "REALM", nil)
-	Register(AttrNonce, "NONCE", nil)
-	Register(AttrUnknownAttributes, "UNKNOWN-ATTRIBUTES", nil)
-	Register(AttrSoftware, "SOFTWARE", nil)
-	Register(AttrAlternateServer, "ALTERNATE-SERVER", AddressCodec)
+func (e errUnsupportedAttr) Error() string {
+	return "stun: unsupported attribute type: " + reflect.Type(e).String()
+}
 
-	// Attributes introduced by the RFC 5780 Section 7.
-	Register(AttrChangeRequest, "CHANGE-REQUEST", nil)
-	Register(AttrPadding, "PADDING", nil)
-	Register(AttrResponsePort, "RESPONSE-PORT", nil)
-	Register(AttrResponseOrigin, "RESPONSE-ORIGIN", AddressCodec)
-	Register(AttrOtherAddress, "OTHER-ADDRESS", AddressCodec)
+// Attributes represents a set of STUN attributes.
+type Attributes map[uint16]interface{}
 
-	// Attributes introduced by the RFC 3489 Section 11.2 except listed above.
-	Register(AttrResponseAddress, "RESPONSE-ADDRESS", AddressCodec)
-	Register(AttrSourceAddress, "SOURCE-ADDRESS", AddressCodec)
-	Register(AttrChangedAddress, "CHANGED-ADDRESS", AddressCodec)
-	Register(AttrPassword, "PASSWORD", nil)
-	Register(AttrReflectedFrom, "REFLECTED-FROM", AddressCodec)
+func (at Attributes) String(id uint16) string {
+	r, ok := at[id]
+	if ok {
+		switch v := r.(type) {
+		case []byte:
+			return string(v)
+		case string:
+			return v
+		case (fmt.Stringer):
+			return v.String()
+		default:
+			return fmt.Sprintf("%", r)
+		}
+	}
+	return ""
 }

@@ -1,4 +1,4 @@
-# Golang STUN, TURN, ICE Protocol Implementation
+# Golang implementation of STUN, TURN and ICE Protocols
 
 [![Build Status](https://travis-ci.org/pixelbender/go-stun.svg)](https://travis-ci.org/pixelbender/go-stun)
 [![Coverage Status](https://coveralls.io/repos/github/pixelbender/go-stun/badge.svg?branch=master)](https://coveralls.io/github/pixelbender/go-stun?branch=master)

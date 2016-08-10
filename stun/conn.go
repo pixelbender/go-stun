@@ -5,55 +5,53 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
 	"net"
 )
 
+var bufferSize = 1400
+
 // A Conn represents the STUN connection and implements the STUN protocol over net.Conn interface.
 type Conn struct {
-	net.Conn
-	dec decoder
-	key []byte
+	conn
+	Codec *MessageCodec
 }
 
-// NewConn creates a Conn connection on the given net.Conn
-func NewConn(inner net.Conn) *Conn {
-	if _, ok := inner.(net.PacketConn); ok {
-		return &Conn{inner, newPacketDecoder(inner)}
-	}
-	return &Conn{inner, newStreamDecoder(inner)}
+// NewConn creates a Conn connection on the given net.Conn and uses codec to encode/decode STUN messages
+func NewConn(inner net.Conn, codec *MessageCodec) *Conn {
+	return &Conn{newConn(inner), codec}
 }
 
 // ReadMessage reads STUN messages from the connection.
-func (conn *Conn) ReadMessage() (*Message, error) {
-	return conn.dec.Decode()
+func (c *Conn) ReadMessage() (*Message, error) {
+	b, err := c.PeekMessage()
+	if err != nil {
+		return nil, err
+	}
+	return c.Codec.Decode(b)
 }
 
-// WriteMessage writes STUN messages to the connection.
-func (conn *Conn) WriteMessage(msg *Message) error {
-	// TODO: use buffer pool
-
-	buf := make([]byte, bufferSize)
-	n, err := msg.Encode(buf)
+// WriteMessage writes the STUN message to the connection.
+func (c *Conn) WriteMessage(msg *Message) error {
+	b := make([]byte, bufferSize)
+	n, err := c.Codec.Encode(msg, b)
 	if err != nil {
 		return err
 	}
-	_, err = conn.Write(buf[:n])
-	if err != nil {
+	if _, err = c.Write(b[:n]); err != nil {
 		return err
 	}
 	return nil
 }
 
 // Exchange sends STUN request and returns STUN response or error.
-func (conn *Conn) Exchange(req *Message) (*Message, error) {
+func (c *Conn) Exchange(req *Message) (*Message, error) {
 	// TODO: retransmissions for packet-oriented network
-	err := conn.WriteMessage(req)
+	err := c.WriteMessage(req)
 	if err != nil {
 		return nil, err
 	}
-	res, err := conn.ReadMessage()
+	res, err := c.ReadMessage()
 	if err != nil {
 		return nil, err
 	}
@@ -65,54 +63,67 @@ func (conn *Conn) Exchange(req *Message) (*Message, error) {
 	return res, nil
 }
 
-type decoder interface {
-	Decode() (*Message, error)
+type conn interface {
+	net.Conn
+	PeekMessage() ([]byte, error)
 }
 
-// streamDecoder reads STUN message from the buffered reader.
-type streamDecoder struct {
-	*bufio.Reader
-}
-
-func newStreamDecoder(r io.Reader) *streamDecoder {
-	buf, ok := r.(*bufio.Reader)
-	if !ok {
-		buf = bufio.NewReaderSize(r, bufferSize)
+func newConn(inner net.Conn) conn {
+	if _, ok := inner.(net.PacketConn); ok {
+		return &packetConn{inner, make([]byte, bufferSize)}
 	}
-	return &streamDecoder{buf}
+	return &streamConn{inner, bufio.NewReaderSize(inner, bufferSize), nil}
 }
 
-func (dec *streamDecoder) Decode() (*Message, error) {
-	b, err := dec.Peek(20)
+// streamConn implements a STUN message framing over stream-oriented network.
+type streamConn struct {
+	net.Conn
+	buf  *bufio.Reader
+	peek []byte
+}
+
+func (c *streamConn) discard() error {
+	if c.peek != nil {
+		if _, err := c.buf.Discard(len(c.peek)); err != nil {
+			return err
+		}
+		c.peek = nil
+	}
+	return nil
+}
+
+func (c *streamConn) Read(p []byte) (int, error) {
+	if err := c.discard(); err != nil {
+		return 0, err
+	}
+	return c.buf.Read(p)
+}
+
+func (c *streamConn) PeekMessage() (b []byte, err error) {
+	if err = c.discard(); err != nil {
+		return
+	}
+	if b, err = c.buf.Peek(20); err != nil {
+		return
+	}
+	b, err = c.buf.Peek(getInt16(b[2:]) + 20)
+	if err != nil {
+		return
+	}
+	c.peek = b
+	return
+}
+
+// packetConn implements a STUN message framing over packet-oriented network.
+type packetConn struct {
+	net.Conn
+	read []byte
+}
+
+func (c *packetConn) PeekMessage() ([]byte, error) {
+	n, err := c.Read(c.read)
 	if err != nil {
 		return nil, err
 	}
-	n := getInt16(b[2:]) + 20
-	if b, err = dec.Peek(n); err != nil {
-		return nil, err
-	}
-	msg, err := DecodeMessage(b)
-	if err != nil {
-		return nil, err
-	}
-	dec.Discard(n)
-	return msg, err
-}
-
-// packetDecoder reads STUN message from the packet-oriented network.
-type packetDecoder struct {
-	io.Reader
-	buf [bufferSize]byte
-}
-
-func newPacketDecoder(r io.Reader) *packetDecoder {
-	return &packetDecoder{Reader: r}
-}
-
-func (dec *packetDecoder) Decode() (*Message, error) {
-	n, err := dec.Read(dec.buf[:])
-	if err != nil {
-		return nil, err
-	}
-	return DecodeMessage(dec.buf[:n])
+	return c.read[:n], nil
 }

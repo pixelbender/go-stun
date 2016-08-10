@@ -13,7 +13,7 @@ func Dial(network, address string) (*Conn, error) {
 		if err != nil {
 			return nil, err
 		}
-		return NewConn(c), err
+		return NewConn(c, nil), err
 	}
 	return nil, fmt.Errorf("stun: dial unsupported network %v", network)
 }
@@ -22,6 +22,12 @@ func Dial(network, address string) (*Conn, error) {
 func ListenAndServe(network, addr string, handler Handler) error {
 	srv := &Server{Handler: handler}
 	return srv.ListenAndServe(network, addr)
+}
+
+// ListenAndServeTLS listens on the network address secured by TLS and calls handler to serve requests.
+func ListenAndServeTLS(network, addr string, certFile, keyFile string, handler Handler) error {
+	srv := &Server{Handler: handler}
+	return srv.ListenAndServeTLS(network, addr, certFile, keyFile)
 }
 
 // ServePacket accepts incoming STUN requests on the packet-oriented network listener and calls handler to serve requests.

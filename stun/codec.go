@@ -3,174 +3,281 @@ package stun
 import (
 	"bytes"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha1"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
+	"strconv"
 )
 
-// AuthProvider returns a key for HMAC-SHA1 sum used in a MESSAGE-INTEGRITY attribute.
-// For long-term credentials: key = MD5(username ":" realm ":" SASLprep(password)).
-// For short-term credentials: key = SASLprep(password).
-// SASLPrep is described in RFC 4013.
-type AuthProvider func(attrs Attributes) []byte
+// ErrUnauthorized is returned by Decode when GetAuthKey is defined
+// but a STUN request does not contain a MESSAGE-INTEGRITY attribute.
+var ErrUnauthorized = errors.New("stun: unauthorized")
+
+// ErrIntegrityCheckFailure is returned by Decode when a STUN message contains
+// a MESSAGE-INTEGRITY attribute and it does not equal to HMAC-SHA1 sum.
+var ErrIntegrityCheckFailure = errors.New("stun: integrity check failure")
+
+// ErrIncorrectFingerprint is returned by Decode when a STUN message contains
+// a FINGERPRINT attribute and it does not equal to checksum.
+var ErrIncorrectFingerprint = errors.New("stun: incorrect fingerprint")
+
+// ErrUnknownAttrs is returned when a STUN message contains unknown comprehension-required attributes.
+type ErrUnknownAttrs []uint16
+
+func (e ErrUnknownAttrs) Error() string {
+	return fmt.Sprintf("stun: unknown attributes %#v", []uint16(e))
+}
 
 // MessageCodec represents a STUN message encoder/decoder.
+// GetAuthKey is required for MESSAGE-INTEGRITY generation.
+// GetAuthKey must return a key for HMAC-SHA1 sum for a MESSAGE-INTEGRITY attribute.
+// LongTermKey returns key = MD5(username ":" realm ":" SASLprep(password)) for long-term credentials.
+// ShortTermKey returns key = SASLprep(password) for short-term credentials.
+// SASLprep is defined in RFC 4013.
 type MessageCodec struct {
-	AuthProvider AuthProvider
-	Fingerprint  bool
+	GetAuthKey        func(attrs Attributes) []byte
+	GetAttributeCodec func(at uint16) AttrCodec
 }
 
 // Encode writes STUN message to the buffer.
-// Generates MESSAGE-INTEGRITY attribute if AuthProvider is specified.
-// Generates FINGERPRINT attribute if Fingerprint is true.
-// Returns io.ErrUnexpectedEOF if the buffer size is not enough.
-func (codec *MessageCodec) Encode(msg *Message, b []byte) (int, error) {
-	if len(b) < 20 {
-		return nil, io.ErrUnexpectedEOF
+// Generates MESSAGE-INTEGRITY attribute if AuthKeyProvider is specified,
+// else generates FINGERPRINT attribute.
+func (codec *MessageCodec) Encode(m *Message, b []byte) (int, error) {
+	if m.Transaction == nil {
+		m.Transaction = newTransaction()
 	}
-
-	putUint16(b, msg.Type)
-	putUint32(b[4:], msg.Cookie)
-	copy(b[8:], msg.Transaction)
-	p, pos := b[20:], 20
-
-	var key []byte
-	if ap := codec.AuthProvider; ap != nil {
-		key = ap(msg.Attributes)
+	if m.Key == nil && codec != nil && codec.GetAuthKey != nil {
+		m.Key = codec.GetAuthKey(m.Attributes)
 	}
-
-	for at, attr := range msg.Attributes {
-		if attr == nil {
-			continue
-		}
-		if len(p) < 4 {
-			return nil, io.ErrUnexpectedEOF
-		}
-		ap := p[4:]
-		c := getAttributeCodec(at)
-		if c == nil {
-			return nil, fmt.Errorf("stun: attribute codec is not registered 0x%x", at)
-		}
-		an, err := c.Encode(attr, ap)
+	putUint16(b, m.Method)
+	copy(b[4:], m.Transaction)
+	p, n := b[20:], 20
+	for attr, v := range m.Attributes {
+		s, err := codec.putAttribute(m, attr, v, p)
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
-		pad := an
-		if mod := an & 3; mod != 0 {
-			pad += 4 - mod
-		}
-		if an < 0 || len(ap) < pad {
-			return nil, fmt.Errorf("stun: attribute codec error 0x%x", at)
-		}
-		putUint16(p, at)
-		putInt16(p[2:], an)
-		for i := an; i < pad; i++ {
-			ap[i] = 0
-		}
-		p, pos = ap[pad:], pos+pad+4
-	}
+		p, n = p[s:], n+s
 
-	if key != nil {
-		if len(p) < 24 {
-			return nil, io.ErrUnexpectedEOF
-		}
-		putUint16(p, AttrMessageIntegrity)
-		putInt16(p[2:], 20)
-		h := hmac.New(sha1.New, key)
-		h.Write(b[:pos])
-		h.Sum(p[4:])
-		p, pos = p[24:], pos+24
 	}
-
-	if codec.Fingerprint {
-		if len(p) < 8 {
-			return nil, io.ErrUnexpectedEOF
+	if m.Key != nil {
+		putInt16(b[2:], n+4)
+		s, err := codec.putMessageIntegrity(b[:n], m.Key, p)
+		if err != nil {
+			return 0, err
 		}
-		putUint16(p, AttrFingerprint)
-		putInt16(p[2:], 4)
-		putUint32(p[4:], checksum(b[:pos]))
-		p, pos = p[8:], pos+8
+		return n + s, nil
 	}
-
-	return pos, nil
+	putInt16(b[2:], n-12)
+	s, err := codec.putFingerprint(b[:n], p)
+	if err != nil {
+		return 0, err
+	}
+	return n + s, nil
 }
 
-// Decode reads STUN message from the buffer wrapping it.
-// Checks MESSAGE-INTEGRITY attribute if AuthProvider is specified.
+func (codec *MessageCodec) putAttribute(msg *Message, attr uint16, v interface{}, b []byte) (int, error) {
+	if len(b) < 4 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	c := attrCodecs[attr]
+	if c == nil && codec != nil && codec.GetAttributeCodec != nil {
+		c = codec.GetAttributeCodec(attr)
+	}
+	if c == nil {
+		c = DefaultAttrCodec
+	}
+	s, err := c.Encode(msg, v, b[4:])
+	if err != nil {
+		return 0, err
+	}
+	n := s + 4
+	if s < 0 || len(b) < n {
+		return 0, errAttrEncode(attr)
+	}
+	putUint16(b, attr)
+	putInt16(b[2:], s)
+
+	// Padding
+	mod := s & 3
+	if mod == 0 {
+		return n, nil
+	}
+	pad := n + 4 - mod
+	if len(b) < pad {
+		return 0, io.ErrUnexpectedEOF
+	}
+	for i := n; i < pad; i++ {
+		b[i] = 0
+	}
+	return pad, nil
+}
+
+func (codec *MessageCodec) putMessageIntegrity(msg, key, b []byte) (int, error) {
+	if len(b) < 24 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	putUint16(b, AttrMessageIntegrity)
+	putInt16(b[2:], 20)
+	h := hmac.New(sha1.New, key)
+	h.Write(msg)
+	h.Sum(b[4:])
+	return 24, nil
+}
+
+func (codec *MessageCodec) putFingerprint(msg, b []byte) (int, error) {
+	if len(b) < 8 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	putUint16(b, AttrFingerprint)
+	putInt16(b[2:], 4)
+	putUint32(b[4:], checksum(msg))
+	return 8, nil
+}
+
+// Decode reads STUN message from the buffer.
+// Checks MESSAGE-INTEGRITY attribute if AuthKeyProvider is specified.
 // Checks FINGERPRINT attribute if present.
 // Returns io.EOF if the buffer size is not enough.
-func (codec *MessageCodec) Decode(b []byte) (*Message, error) {
-	if len(b) < 20 {
+// Returns ErrUnknownAttrs containing unknown comprehension-required STUN attributes.
+func (codec *MessageCodec) Decode(bb []byte) (*Message, error) {
+	if len(bb) < 20 {
 		return nil, io.EOF
 	}
-	n := getInt16(b[2:]) + 20
-	if len(b) < n {
+	s := getInt16(bb[2:]) + 20
+	if len(bb) < s {
 		return nil, io.EOF
 	}
+	b := make([]byte, s)
+	copy(b, bb[:s])
 
-	var integrity, sum []byte
-	var unk ErrUnknownAttributes
-
-	msg := &Message{
-		Type:        getUint16(b),
-		Cookie:      getUint32(b[4:]),
-		Transaction: b[8:20],
+	m := &Message{
+		Method:      getUint16(b),
+		Transaction: b[4:20],
 		Attributes:  make(Attributes),
 	}
-	p, pos := b[20:], 20
 
-	for len(p) > 4 {
-		at, an := getUint16(p), getInt16(p[2:])
-		pad := an
-		if mod := an & 3; mod != 0 {
+	buf, n, checked := b[20:], 20, false
+	var unk ErrUnknownAttrs
+
+	for len(buf) > 4 {
+		attr, s := getUint16(buf), getInt16(buf[2:])
+		mod, pad := s&3, s+4
+		if mod != 0 {
 			pad += 4 - mod
 		}
-		if p = p[4:]; len(p) < pad {
-			return nil, ErrBadFormat
+		if len(buf) < pad {
+			return nil, errAttrDecode(attr)
 		}
-		c := getAttributeCodec(at)
+		c := attrCodecs[attr]
+		if c == nil && codec != nil && codec.GetAttributeCodec != nil {
+			c = codec.GetAttributeCodec(attr)
+		}
 		if c == nil {
-			unk = append(unk, at)
-			continue
+			if attr < 0x8000 {
+				unk = append(unk, attr)
+			}
+			c = DefaultAttrCodec
 		}
-		if at == AttrMessageIntegrity && integrity == nil {
-			if an != 20 {
-				return nil, ErrBadFormat
-			}
-			integrity = b[:pos]
-			sum = p[:an]
-			break
-		} else if at == AttrFingerprint {
-			if an != 4 {
-				return nil, ErrBadFormat
-			}
-			if getUint32(p) != checksum(b[:pos]) {
-				return nil, ErrBadFormat
-			}
-			break
-		}
-		attr, err := c.Decode(p[:an])
+		v, err := c.Decode(m, buf[4:s+4])
 		if err != nil {
 			return nil, err
 		}
-		msg.Attributes[at] = attr
-		p, pos = p[pad:], pos+pad+4
-	}
-
-	if ap := codec.AuthProvider; ap != nil {
-		key := ap(msg.Attributes)
-		h := hmac.New(sha1.New, key)
-		h.Write(integrity)
-		if !bytes.Equal(sum, h.Sum(nil)) {
-			return nil, ErrUnauthorized
+		m.Attributes[attr] = v
+		if attr == AttrMessageIntegrity {
+			putInt16(b[2:], n+4)
+			if codec != nil && codec.GetAuthKey != nil {
+				m.Key = codec.GetAuthKey(m.Attributes)
+			}
+			if err = codec.checkMessageIntegrity(b[:n], m.Key, v.([]byte)); err != nil {
+				return nil, err
+			}
+			checked = true
+			break
 		}
+		if attr == AttrFingerprint {
+			if s != 4 {
+				return nil, errAttrDecode(attr)
+			}
+			putInt16(b[2:], n-12)
+			if v.(uint32) != checksum(b[:n]) {
+				return nil, ErrIncorrectFingerprint
+			}
+			break
+		}
+		buf, n = buf[pad:], n+pad
 	}
-
+	if !checked && codec != nil && codec.GetAuthKey != nil {
+		return nil, ErrUnauthorized
+	}
 	if unk != nil {
-		return nil, unk
+		return m, unk
 	}
-	return msg, nil
+	return m, nil
+}
+
+func (codec *MessageCodec) checkMessageIntegrity(msg, key, v []byte) error {
+	if len(v) != 20 {
+		return errAttrDecode(AttrMessageIntegrity)
+	}
+	h := hmac.New(sha1.New, key)
+	h.Write(msg)
+	if !bytes.Equal(v, h.Sum(nil)) {
+		return ErrIntegrityCheckFailure
+	}
+	return nil
+}
+
+type errAttrEncode uint16
+
+func (e errAttrEncode) Error() string {
+	return "stun: attribute encode error: 0x" + strconv.FormatUint(uint64(e), 16)
+}
+
+type errAttrDecode uint16
+
+func (e errAttrDecode) Error() string {
+	return "stun: attribute decode error: 0x" + strconv.FormatUint(uint64(e), 16)
+}
+
+type errAttrNoCodec uint16
+
+func (e errAttrNoCodec) Error() string {
+	return "stun: attribute codec not found: 0x" + strconv.FormatUint(uint64(e), 16)
+}
+
+type uintCodec struct{}
+
+func (uintCodec) Encode(msg *Message, attr interface{}, b []byte) (int, error) {
+	if len(b) < 4 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	switch v := attr.(type) {
+	case uint32:
+		putUint32(b, v)
+	case int:
+		putUint32(b, uint32(v))
+	}
+	return DefaultAttrCodec.Encode(msg, attr, b)
+}
+
+func (uintCodec) Decode(msg *Message, b []byte) (interface{}, error) {
+	if len(b) < 4 {
+		return nil, io.EOF
+	}
+	return getUint32(b), nil
+}
+
+const magicCookie = uint32(0x2112a442)
+
+func newTransaction() (tx []byte) {
+	tx = make([]byte, 16)
+	putUint32(tx, magicCookie)
+	rand.Read(tx[4:])
+	return
 }
 
 // checksum calculates FINGERPRINT attribute value for the STUN message bytes.
