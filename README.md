@@ -10,18 +10,21 @@ There is no working release yet. Stay tuned.
 ## Roadmap
 
 - [x] STUN Message Encoder/Decoder
-- [ ] STUN Server
-- [ ] STUN Message integrity check
-- [ ] ICE STUN Attributes
+- [x] STUN Client
+- [x] STUN Server
+- [x] STUN Message integrity check
+- [x] ICE STUN Attributes
+- [x] ICE STUN Errors
 - [ ] ICE Candidates gathering
 - [ ] ICE Lite
 - [ ] ICE SDP Attributes
-- [ ] TURN
+- [ ] TURN STUN Attributes
+- [x] TURN STUN Errors
 - [ ] ...
 
 ## Features
 
-- [ ] [RFC 5389: STUN](https://tools.ietf.org/html/rfc5389)
+- [x] [RFC 5389: STUN](https://tools.ietf.org/html/rfc5389)
 - [ ] [RFC 5766: TURN: Relay Extensions to STUN](https://tools.ietf.org/html/rfc5766)
 - [ ] [RFC 5245: ICE: A Protocol for NAT for Offer/Answer Protocols](https://tools.ietf.org/html/rfc5245)
 - [ ] [RFC 6062: TURN Extensions for TCP Allocations](https://tools.ietf.org/html/rfc6062)

@@ -69,8 +69,7 @@ var attrCodecs = map[uint16]AttrCodec{
 	AttrReflectedFrom:     AddrCodec,
 }
 
-// DefaultAttrCodec decodes a STUN attribute as []byte.
-// Encodes []byte or string using copy.
+// DefaultAttrCodec encodes and decodes a STUN attribute as a byte array.
 var DefaultAttrCodec attrCodec
 
 type attrCodec struct{}
