@@ -48,6 +48,11 @@ type Error struct {
 	Reason string
 }
 
+// NewError returns Error with code and default reason phrase.
+func NewError(code int) *Error {
+	return &Error{Code: code, Reason: ErrorText(code)}
+}
+
 // String returns the string form of the error attribute.
 func (e *Error) String() string {
 	return e.Reason

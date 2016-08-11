@@ -117,13 +117,13 @@ func (c *streamConn) PeekMessage() (b []byte, err error) {
 // packetConn implements a STUN message framing over packet-oriented network.
 type packetConn struct {
 	net.Conn
-	read []byte
+	buf []byte
 }
 
 func (c *packetConn) PeekMessage() ([]byte, error) {
-	n, err := c.Read(c.read)
+	n, err := c.Read(c.buf)
 	if err != nil {
 		return nil, err
 	}
-	return c.read[:n], nil
+	return c.buf[:n], nil
 }

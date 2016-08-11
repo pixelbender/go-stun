@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"time"
 )
@@ -23,8 +24,10 @@ func (f HandlerFunc) ServeSTUN(tx *Transaction) {
 
 // Server represents a STUN server.
 type Server struct {
-	Handler Handler
-	Codec   *MessageCodec
+	Realm    string
+	Software string
+	Handler  Handler
+	Codec    *MessageCodec
 }
 
 // ListenAndServe listens on the network address and calls handler to serve requests.
@@ -73,10 +76,7 @@ func (srv *Server) ServePacket(l net.PacketConn) error {
 			return err
 		}
 		msg, err := srv.Codec.Decode(buf[:n])
-		if err != nil {
-			continue
-		}
-		srv.serveMessage(&packetWriter{l, addr, srv.Codec}, msg)
+		srv.serve(&packetWriter{l, addr, srv.Codec}, msg, err)
 	}
 }
 
@@ -100,17 +100,52 @@ func (srv *Server) serveConn(conn net.Conn) error {
 	c := NewConn(conn, srv.Codec)
 	defer c.Close()
 	for {
-		msg, err := c.ReadMessage()
+		b, err := c.PeekMessage()
 		if err != nil {
 			return err
 		}
-		srv.serveMessage(c, msg)
+		msg, err := srv.Codec.Decode(b)
+		srv.serve(c, msg, err)
 	}
 }
 
-func (srv *Server) serveMessage(conn transConn, msg *Message) {
-	if srv.Handler != nil {
-		srv.Handler.ServeSTUN(&Transaction{conn, msg})
+func (srv *Server) serve(conn transConn, msg *Message, err error) {
+	tx := &Transaction{conn, msg}
+	switch err {
+	case ErrUnauthorized, ErrIncorrectFingerprint:
+		tx.WriteResponse(TypeError, Attributes{
+			AttrErrorCode: NewError(CodeUnauthorized),
+			AttrRealm:     srv.Realm,
+			AttrSoftware:  srv.Software,
+		})
+		return
+	case ErrFormat, ErrIncorrectFingerprint:
+		return
+	}
+	if unk, ok := err.(ErrUnknownAttrs); ok {
+		tx.WriteResponse(TypeError, Attributes{
+			AttrErrorCode:         NewError(CodeUnknownAttribute),
+			AttrUnknownAttributes: unk,
+			AttrSoftware:          srv.Software,
+		})
+		return
+	}
+	if err != nil {
+		log.Printf(">>> %v", err)
+	}
+	if h := srv.Handler; h != nil {
+		h.ServeSTUN(tx)
+		return
+	}
+	switch msg.Method {
+	case MethodBinding:
+		tx.WriteResponse(TypeResponse, Attributes{
+			AttrErrorCode:        NewError(CodeUnknownAttribute),
+			AttrXorMappedAddress: conn.RemoteAddr(),
+			AttrMappedAddress:    conn.RemoteAddr(),
+			AttrResponseOrigin:   conn.LocalAddr(),
+			AttrSoftware:         srv.Software,
+		})
 	}
 }
 

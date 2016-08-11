@@ -24,6 +24,9 @@ var ErrIntegrityCheckFailure = errors.New("stun: integrity check failure")
 // a FINGERPRINT attribute and it does not equal to checksum.
 var ErrIncorrectFingerprint = errors.New("stun: incorrect fingerprint")
 
+// ErrFormat is returned by Decode when a buffer is not a valid STUN message.
+var ErrFormat = errors.New("stun: incorrect format")
+
 // ErrUnknownAttrs is returned when a STUN message contains unknown comprehension-required attributes.
 type ErrUnknownAttrs []uint16
 
@@ -40,11 +43,12 @@ func (e ErrUnknownAttrs) Error() string {
 type MessageCodec struct {
 	GetAuthKey        func(attrs Attributes) []byte
 	GetAttributeCodec func(at uint16) AttrCodec
+	Fingerprint       bool
 }
 
 // Encode writes STUN message to the buffer.
-// Generates MESSAGE-INTEGRITY attribute if AuthKeyProvider is specified,
-// else generates FINGERPRINT attribute.
+// Generates MESSAGE-INTEGRITY attribute if GetAuthKey is specified.
+// Adds FINGERPRINT attribute if Fingerprint is true.
 func (codec *MessageCodec) Encode(m *Message, b []byte) (int, error) {
 	if m.Transaction == nil {
 		m.Transaction = newTransaction()
@@ -61,7 +65,6 @@ func (codec *MessageCodec) Encode(m *Message, b []byte) (int, error) {
 			return 0, err
 		}
 		p, n = p[s:], n+s
-
 	}
 	if m.Key != nil {
 		putInt16(b[2:], n+4)
@@ -71,12 +74,16 @@ func (codec *MessageCodec) Encode(m *Message, b []byte) (int, error) {
 		}
 		return n + s, nil
 	}
-	putInt16(b[2:], n-12)
-	s, err := codec.putFingerprint(b[:n], p)
-	if err != nil {
-		return 0, err
+	if codec != nil && codec.Fingerprint {
+		putInt16(b[2:], n-12)
+		s, err := codec.putFingerprint(b[:n], p)
+		if err != nil {
+			return 0, err
+		}
+		return n + s, nil
 	}
-	return n + s, nil
+	putInt16(b[2:], n-20)
+	return n, nil
 }
 
 func (codec *MessageCodec) putAttribute(msg *Message, attr uint16, v interface{}, b []byte) (int, error) {
@@ -139,7 +146,7 @@ func (codec *MessageCodec) putFingerprint(msg, b []byte) (int, error) {
 }
 
 // Decode reads STUN message from the buffer.
-// Checks MESSAGE-INTEGRITY attribute if AuthKeyProvider is specified.
+// Checks MESSAGE-INTEGRITY attribute if GetAuthKey is specified.
 // Checks FINGERPRINT attribute if present.
 // Returns io.EOF if the buffer size is not enough.
 // Returns ErrUnknownAttrs containing unknown comprehension-required STUN attributes.

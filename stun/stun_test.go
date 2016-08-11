@@ -156,7 +156,7 @@ func TestVectorsSampleIPv6Response(t *testing.T) {
 	}
 	addr := msg.Attributes[AttrXorMappedAddress].(*Addr)
 	if addr == nil || !addr.IP.Equal(net.ParseIP("2001:db8:1234:5678:11:2233:4455:6677")) || addr.Port != 32853 {
-		t.Fatal("address check", addr) //         2001:db8:84c1:553b:9d37:50f7:9fc0:1d9b
+		t.Fatal("address check", addr)
 	}
 }
 
