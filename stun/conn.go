@@ -2,128 +2,175 @@ package stun
 
 import (
 	"bufio"
-	"bytes"
-	"encoding/hex"
-	"fmt"
-	"log"
+	"io"
 	"net"
+	"time"
 )
 
-var bufferSize = 1400
+// Config represents a STUN connection configuration.
+type Config struct {
+	// GetAuthKey returns a key for a MESSAGE-INTEGRITY attribute generation and validation.
+	// Key = MD5(username ":" realm ":" SASLprep(password)) for long-term credentials.
+	// Key = SASLprep(password) for short-term credentials.
+	// SASLprep is defined in RFC 4013.
+	// The Username and Password fields are ignored if GetAuthKey is defined.
+	GetAuthKey func(attrs Attributes) ([]byte, error)
+
+	// GetAttributeCodec returns STUN attribute codec for the specified attribute type.
+	// Using stun.GetAttributeCodec if GetAttributeCodec is nil.
+	GetAttributeCodec func(at uint16) AttrCodec
+
+	// Fingerprint controls whether a FINGERPRINT attribute will be generated.
+	Fingerprint bool
+
+	// Software is a value for SOFTWARE attribute.
+	Software string
+}
+
+func (c *Config) getAuthKey(attrs Attributes) ([]byte, error) {
+	if c != nil && c.GetAuthKey != nil {
+		return c.GetAuthKey(attrs)
+	}
+	return nil, nil
+}
+
+func (c *Config) getAttrCodec(at uint16) AttrCodec {
+	if c != nil && c.GetAttributeCodec != nil {
+		return c.GetAttributeCodec(at)
+	}
+	return GetAttributeCodec(at)
+}
+
+var DefaultConfig = &Config{
+	GetAttributeCodec: GetAttributeCodec,
+}
 
 // A Conn represents the STUN connection and implements the STUN protocol over net.Conn interface.
 type Conn struct {
-	conn
-	Codec *MessageCodec
+	net.Conn
+	config   *Config
+	dec      *Decoder
+	enc      *Encoder
+	cr       connReader
+	reliable bool
+	key      []byte
 }
 
-// NewConn creates a Conn connection on the given net.Conn and uses codec to encode/decode STUN messages
-func NewConn(inner net.Conn, codec *MessageCodec) *Conn {
-	return &Conn{newConn(inner), codec}
+// NewConn creates a Conn connection over the c with specified configuration.
+func NewConn(inner net.Conn, config *Config) *Conn {
+	if config == nil {
+		config = DefaultConfig
+	}
+	c := &Conn{
+		Conn:   inner,
+		config: config,
+		dec:    NewDecoder(config),
+		enc:    NewEncoder(config),
+	}
+	if _, ok := inner.(net.PacketConn); ok {
+		c.cr = newPacketReader(inner)
+		c.reliable = false
+	} else {
+		c.cr = newStreamReader(inner)
+		c.reliable = true
+	}
+	return c
 }
 
 // ReadMessage reads STUN messages from the connection.
 func (c *Conn) ReadMessage() (*Message, error) {
-	b, err := c.PeekMessage()
+	b, err := c.cr.PeekMessageBytes()
 	if err != nil {
 		return nil, err
 	}
-	return c.Codec.Decode(b)
+	msg, err := c.dec.Decode(b, c.key)
+	return msg, err
 }
 
 // WriteMessage writes the STUN message to the connection.
 func (c *Conn) WriteMessage(msg *Message) error {
-	b := make([]byte, bufferSize)
-	n, err := c.Codec.Encode(msg, b)
+	b, err := c.enc.Encode(msg)
 	if err != nil {
 		return err
 	}
-	if _, err = c.Write(b[:n]); err != nil {
+	if _, err = c.Write(b); err != nil {
 		return err
 	}
 	return nil
 }
 
-// Exchange sends STUN request and returns STUN response or error.
-func (c *Conn) Exchange(req *Message) (*Message, error) {
-	// TODO: retransmissions for packet-oriented network
-	err := c.WriteMessage(req)
+type connReader interface {
+	// PeekMessageBytes returns the bytes, containing a STUN message.
+	// The bytes stop being valid at the next read call.
+	PeekMessageBytes() ([]byte, error)
+}
+
+var bufferSize = 1400
+
+// streamReader reads a STUN message transmitted over a stream-oriented network.
+type streamReader struct {
+	*bufio.Reader
+	r    io.Reader
+	skip int
+}
+
+func newStreamReader(r io.Reader) *streamReader {
+	if tcp, ok := r.(*net.TCPConn); ok {
+		tcp.SetKeepAlive(true)
+		tcp.SetKeepAlivePeriod(30 * time.Second)
+	}
+	return &streamReader{bufio.NewReaderSize(r, bufferSize), r, 0}
+}
+
+func (c *streamReader) Read(b []byte) (int, error) {
+	c.discard()
+	return c.Read(b)
+}
+
+func (c *streamReader) PeekMessageBytes() ([]byte, error) {
+	c.discard()
+	h, err := c.Peek(4)
 	if err != nil {
 		return nil, err
 	}
-	res, err := c.ReadMessage()
+	if be.Uint16(h)&0xc000 != 0 {
+		return nil, ErrFormat
+	}
+	n := int(be.Uint16(h[2:])) + 20
+	b, err := c.Peek(n)
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(req.Transaction, res.Transaction) {
-		log.Printf("REQ: %s", hex.EncodeToString(req.Transaction))
-		log.Printf("RES: %s", hex.EncodeToString(res.Transaction))
-		return nil, fmt.Errorf("stun: transaction error")
-	}
-	return res, nil
+	c.skip = n
+	return b, nil
 }
 
-type conn interface {
-	net.Conn
-	PeekMessage() ([]byte, error)
+func (c *streamReader) discard() {
+	if c.skip > 0 {
+		c.Discard(c.skip)
+		c.skip = 0
+	}
 }
 
-func newConn(inner net.Conn) conn {
-	if _, ok := inner.(net.PacketConn); ok {
-		return &packetConn{inner, make([]byte, bufferSize)}
-	}
-	return &streamConn{inner, bufio.NewReaderSize(inner, bufferSize), nil}
-}
-
-// streamConn implements a STUN message framing over stream-oriented network.
-type streamConn struct {
-	net.Conn
-	buf  *bufio.Reader
-	peek []byte
-}
-
-func (c *streamConn) discard() error {
-	if c.peek != nil {
-		if _, err := c.buf.Discard(len(c.peek)); err != nil {
-			return err
-		}
-		c.peek = nil
-	}
-	return nil
-}
-
-func (c *streamConn) Read(p []byte) (int, error) {
-	if err := c.discard(); err != nil {
-		return 0, err
-	}
-	return c.buf.Read(p)
-}
-
-func (c *streamConn) PeekMessage() (b []byte, err error) {
-	if err = c.discard(); err != nil {
-		return
-	}
-	if b, err = c.buf.Peek(20); err != nil {
-		return
-	}
-	b, err = c.buf.Peek(getInt16(b[2:]) + 20)
-	if err != nil {
-		return
-	}
-	c.peek = b
-	return
-}
-
-// packetConn implements a STUN message framing over packet-oriented network.
-type packetConn struct {
-	net.Conn
+// packetConn reads a STUN message transmitted over a packet-oriented network.
+type packetReader struct {
+	io.Reader
 	buf []byte
 }
 
-func (c *packetConn) PeekMessage() ([]byte, error) {
+func newPacketReader(r io.Reader) *packetReader {
+	return &packetReader{r, make([]byte, bufferSize)}
+}
+
+func (c *packetReader) PeekMessageBytes() ([]byte, error) {
 	n, err := c.Read(c.buf)
 	if err != nil {
 		return nil, err
 	}
-	return c.buf[:n], nil
+	b := c.buf[:n]
+	l := int(be.Uint16(b[2:])) + 20
+	if n < l {
+		return nil, ErrTruncated
+	}
+	return b, nil
 }

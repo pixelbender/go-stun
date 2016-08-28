@@ -1,33 +1,46 @@
 package stun
 
 import (
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"time"
 )
 
 // A Handler handles a STUN message.
 type Handler interface {
-	ServeSTUN(tx *Transaction)
+	ServeSTUN(rw ResponseWriter, r *Message)
 }
 
 // The HandlerFunc type is an adapter to allow the use of ordinary functions as STUN handlers.
-type HandlerFunc func(tx *Transaction)
+type HandlerFunc func(rw ResponseWriter, r *Message)
 
-// ServeSTUN calls f(tx).
-func (f HandlerFunc) ServeSTUN(tx *Transaction) {
-	f(tx)
+// ServeSTUN calls f(rw, r).
+func (f HandlerFunc) ServeSTUN(rw ResponseWriter, r *Message) {
+	f(rw, r)
+}
+
+type ResponseWriter interface {
+	LocalAddr() net.Addr
+	RemoteAddr() net.Addr
+	// WriteResponse writes STUN response within the transaction.
+	WriteMessage(msg *Message) error
 }
 
 // Server represents a STUN server.
 type Server struct {
-	Realm    string
-	Software string
-	Handler  Handler
-	Codec    *MessageCodec
+	*Config
+	Realm   string
+	Handler Handler
+}
+
+func NewServer(config *Config) *Server {
+	if config == nil {
+		config = DefaultConfig
+	}
+	return &Server{Config: config}
 }
 
 // ListenAndServe listens on the network address and calls handler to serve requests.
@@ -39,7 +52,7 @@ func (srv *Server) ListenAndServe(network, addr string) error {
 		if err != nil {
 			return err
 		}
-		return srv.Serve(tcpKeepAliveListener{l.(*net.TCPListener)})
+		return srv.Serve(l)
 	case "udp", "udp4", "udp6":
 		l, err := net.ListenPacket(network, addr)
 		if err != nil {
@@ -62,21 +75,25 @@ func (srv *Server) ListenAndServeTLS(network, addr, certFile, keyFile string) er
 	if err != nil {
 		return err
 	}
-	l = tls.NewListener(tcpKeepAliveListener{l.(*net.TCPListener)}, config)
+	l = tls.NewListener(l, config)
 	return srv.Serve(l)
 }
 
 // ServePacket receives incoming packets on the packet-oriented network listener and calls handler to serve STUN requests.
 // Multiple goroutines may invoke ServePacket on the same PacketConn simultaneously.
 func (srv *Server) ServePacket(l net.PacketConn) error {
+	enc := NewEncoder(srv.Config)
+	dec := NewDecoder(srv.Config)
 	buf := make([]byte, bufferSize)
+
 	for {
 		n, addr, err := l.ReadFrom(buf)
 		if err != nil {
 			return err
 		}
-		msg, err := srv.Codec.Decode(buf[:n])
-		srv.serve(&packetWriter{l, addr, srv.Codec}, msg, err)
+		msg, err := dec.Decode(buf[:n], nil)
+		rw := &packetResponseWriter{l, msg, addr, enc}
+		srv.serve(rw, msg, err)
 	}
 }
 
@@ -97,133 +114,116 @@ func (srv *Server) Serve(l net.Listener) error {
 }
 
 func (srv *Server) serveConn(conn net.Conn) error {
-	c := NewConn(conn, srv.Codec)
+	c := NewConn(conn, srv.Config)
 	defer c.Close()
 	for {
-		b, err := c.PeekMessage()
+		msg, err := c.ReadMessage()
 		if err != nil {
 			return err
 		}
-		msg, err := srv.Codec.Decode(b)
-		srv.serve(c, msg, err)
+		srv.serve(&connResponseWriter{c, msg}, msg, err)
 	}
 }
 
-func (srv *Server) serve(conn transConn, msg *Message, err error) {
-	tx := &Transaction{conn, msg}
-	switch err {
-	case ErrUnauthorized, ErrIncorrectFingerprint:
-		tx.WriteResponse(TypeError, Attributes{
-			AttrErrorCode: NewError(CodeUnauthorized),
-			AttrRealm:     srv.Realm,
-			AttrSoftware:  srv.Software,
-		})
-		return
-	case ErrFormat, ErrIncorrectFingerprint:
-		return
-	}
-	if unk, ok := err.(ErrUnknownAttrs); ok {
-		tx.WriteResponse(TypeError, Attributes{
-			AttrErrorCode:         NewError(CodeUnknownAttribute),
-			AttrUnknownAttributes: unk,
-			AttrSoftware:          srv.Software,
-		})
-		return
+func (srv *Server) serve(rw ResponseWriter, r *Message, err error) error {
+	if r.IsType(TypeRequest) || r.IsType(TypeIndication) {
+		if srv.GetAuthKey != nil {
+			if !r.Attributes.Has(AttrMessageIntegrity) || !r.Attributes.Has(AttrMessageIntegrity) {
+				err = ErrUnauthorized
+			}
+		}
 	}
 	if err != nil {
-		log.Printf(">>> %v", err)
+		switch err {
+		case ErrUnauthorized, ErrIncorrectFingerprint:
+			// TODO: store nonce
+			nonce := make([]byte, 8)
+			rand.Read(nonce)
+			return rw.WriteMessage(&Message{
+				Method: r.Method | TypeError,
+				Attributes: Attributes{
+					AttrErrorCode: NewError(CodeUnauthorized),
+					AttrRealm:     srv.Realm,
+					AttrNonce:     hex.EncodeToString(nonce),
+				},
+			})
+		}
+		if unk, ok := err.(ErrUnknownAttrs); ok {
+			return rw.WriteMessage(&Message{
+				Method: r.Method | TypeError,
+				Attributes: Attributes{
+					AttrErrorCode:         NewError(CodeUnknownAttribute),
+					AttrUnknownAttributes: unk,
+				},
+			})
+		}
+		// TODO: log error
+		return nil
 	}
 	if h := srv.Handler; h != nil {
-		h.ServeSTUN(tx)
-		return
-	}
-	switch msg.Method {
-	case MethodBinding:
-		tx.WriteResponse(TypeResponse, Attributes{
-			AttrErrorCode:        NewError(CodeUnknownAttribute),
-			AttrXorMappedAddress: conn.RemoteAddr(),
-			AttrMappedAddress:    conn.RemoteAddr(),
-			AttrResponseOrigin:   conn.LocalAddr(),
-			AttrSoftware:         srv.Software,
-		})
-	}
-}
-
-// A Transaction represents an incoming STUN transaction.
-type Transaction struct {
-	c       transConn
-	Message *Message
-}
-
-// WriteResponse writes STUN response within the transaction.
-func (tx *Transaction) WriteResponse(m uint16, attrs Attributes) error {
-	return tx.WriteMessage(&Message{
-		Method:     tx.Message.Method | m,
-		Attributes: attrs,
-	})
-}
-
-// WriteMessage writes STUN message within the transaction.
-func (tx *Transaction) WriteMessage(msg *Message) error {
-	m := tx.Message
-	msg.Transaction = m.Transaction
-	msg.Key = m.Key
-	return tx.c.WriteMessage(msg)
-}
-
-// LocalAddr returns the local network address.
-func (tx *Transaction) LocalAddr() net.Addr {
-	return tx.c.LocalAddr()
-}
-
-// RemoteAddr returns the remote network address.
-func (tx *Transaction) RemoteAddr() net.Addr {
-	return tx.c.RemoteAddr()
-}
-
-type transConn interface {
-	io.Writer
-	LocalAddr() net.Addr
-	RemoteAddr() net.Addr
-	WriteMessage(msg *Message) error
-}
-
-type packetWriter struct {
-	net.PacketConn
-	addr  net.Addr
-	codec *MessageCodec
-}
-
-func (w *packetWriter) RemoteAddr() net.Addr {
-	return w.addr
-}
-
-func (w *packetWriter) Write(b []byte) (int, error) {
-	return w.WriteTo(b, w.addr)
-}
-
-func (w *packetWriter) WriteMessage(msg *Message) error {
-	b := make([]byte, bufferSize)
-	n, err := w.codec.Encode(msg, b)
-	if err != nil {
-		return err
-	}
-	if _, err = w.Write(b[:n]); err != nil {
-		return err
+		h.ServeSTUN(rw, r)
+	} else {
+		srv.ServeSTUN(rw, r)
 	}
 	return nil
 }
 
-type tcpKeepAliveListener struct {
-	*net.TCPListener
+// ServeSTUN responds to the simple STUN binding request.
+func (srv *Server) ServeSTUN(rw ResponseWriter, r *Message) {
+	switch r.Method {
+	case MethodBinding:
+		rw.WriteMessage(&Message{
+			Method: r.Method | TypeResponse,
+			Attributes: Attributes{
+				AttrXorMappedAddress: rw.RemoteAddr(),
+				AttrMappedAddress:    rw.RemoteAddr(),
+				AttrResponseOrigin:   rw.LocalAddr(),
+				// TODO: add other address
+				// TODO: handle change request
+			},
+		})
+	}
 }
 
-func (l tcpKeepAliveListener) Accept() (net.Conn, error) {
-	c, err := l.AcceptTCP()
-	if err != nil {
-		return nil, err
+type connResponseWriter struct {
+	*Conn
+	msg *Message
+}
+
+func (w *connResponseWriter) WriteMessage(msg *Message) error {
+	if msg.Transaction == nil {
+		msg.Transaction = w.msg.Transaction
 	}
-	c.SetKeepAlive(true)
-	c.SetKeepAlivePeriod(time.Minute)
-	return c, nil
+	if msg.Key == nil {
+		msg.Key = w.msg.Key
+	}
+	return w.Conn.WriteMessage(msg)
+}
+
+type packetResponseWriter struct {
+	net.PacketConn
+	msg  *Message
+	addr net.Addr
+	enc  *Encoder
+}
+
+func (w *packetResponseWriter) RemoteAddr() net.Addr {
+	return w.addr
+}
+
+func (w *packetResponseWriter) WriteMessage(msg *Message) error {
+	if msg.Transaction == nil {
+		msg.Transaction = w.msg.Transaction
+	}
+	if msg.Key == nil {
+		msg.Key = w.msg.Key
+	}
+	b, err := w.enc.Encode(msg)
+	if err != nil {
+		return err
+	}
+	if _, err = w.WriteTo(b, w.addr); err != nil {
+		return err
+	}
+	return nil
 }

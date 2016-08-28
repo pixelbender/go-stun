@@ -1,8 +1,8 @@
 package stun
 
 import (
-	"io"
 	"net"
+	"reflect"
 	"strconv"
 )
 
@@ -17,6 +17,8 @@ func (addr *Addr) String() string {
 	return net.JoinHostPort(addr.IP.String(), strconv.Itoa(addr.Port))
 }
 
+var xorMask = []byte{0x21, 0x12, 0xa4, 0x42}
+
 // AddrCodec is the codec for a transport address attribute.
 const AddrCodec = addrCodec(false)
 
@@ -25,59 +27,72 @@ const XorAddrCodec = addrCodec(true)
 
 type addrCodec bool
 
-func (c addrCodec) Encode(msg *Message, v interface{}, b []byte) (int, error) {
-	var ip net.IP
-	var port int
-	switch a := v.(type) {
+func (c addrCodec) Encode(w Writer, v interface{}) error {
+	switch addr := v.(type) {
 	case *net.UDPAddr:
-		ip, port = a.IP, a.Port
+		c.writeAddress(w, addr.IP, addr.Port)
 	case *net.TCPAddr:
-		ip, port = a.IP, a.Port
+		c.writeAddress(w, addr.IP, addr.Port)
 	case *Addr:
-		ip, port = a.IP, a.Port
+		c.writeAddress(w, addr.IP, addr.Port)
 	default:
-		return DefaultAttrCodec.Encode(msg, v, b)
+		return &errUnsupportedAttrType{Type: reflect.TypeOf(v)}
 	}
-	fam, short := byte(0x01), ip.To4()
-	if len(short) == 0 {
-		fam, short = byte(0x02), ip
+	return nil
+}
+
+func (c addrCodec) writeAddress(w Writer, ip net.IP, port int) {
+	fam, sh := byte(0x01), ip.To4()
+	if len(sh) == 0 {
+		fam, sh = byte(0x02), ip
 	}
-	n := 4 + len(ip)
-	if len(b) < n {
-		return 0, io.ErrUnexpectedEOF
-	}
+	b := w.Next(4 + len(sh))
 	b[0] = 0
 	b[1] = fam
 	if c {
-		putInt16(b[2:], port^0x2112)
-		for i, it := range short {
-			b[4+i] = it ^ msg.Transaction[i]
+		be.PutUint16(b[2:], uint16(port)^0x2112)
+		b = b[4:]
+		if enc, ok := w.(*writer); ok {
+			for i, it := range sh {
+				b[i] = it ^ enc.buf[i+4]
+			}
+		} else {
+			for i, it := range sh {
+				b[i] = it ^ xorMask[i%4]
+			}
 		}
 	} else {
-		putInt16(b[2:], port)
-		copy(b[4:], short)
+		be.PutUint16(b[2:], uint16(port))
+		copy(b[4:], sh)
 	}
-	return n, nil
 }
 
-func (c addrCodec) Decode(msg *Message, b []byte) (interface{}, error) {
-	if len(b) < 4 {
-		return nil, io.EOF
+func (c addrCodec) Decode(r Reader) (interface{}, error) {
+	b, err := r.Next(4)
+	if err != nil {
+		return nil, err
 	}
-	n, port := net.IPv4len, getInt16(b[2:])
+	n, port := net.IPv4len, int(be.Uint16(b[2:]))
 	if b[1] == 0x02 {
 		n = net.IPv6len
 	}
-	if b = b[4:]; len(b) < n {
-		return nil, io.EOF
+	if b, err = r.Next(n); err != nil {
+		return nil, err
 	}
-	ip := make(net.IP, n)
+	ip := make([]byte, len(b))
 	if c {
-		for i, it := range b {
-			ip[i] = it ^ msg.Transaction[i]
+		if dec, ok := r.(*reader); ok {
+			for i, it := range b {
+				ip[i] = it ^ dec.msg[i+4]
+			}
+		} else {
+			for i, it := range b {
+				ip[i] = it ^ xorMask[i%4]
+			}
 		}
 		return &Addr{IP: ip, Port: port ^ 0x2112}, nil
+	} else {
+		copy(ip, b)
 	}
-	copy(ip, b)
 	return &Addr{IP: ip, Port: port}, nil
 }

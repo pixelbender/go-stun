@@ -8,15 +8,7 @@ import (
 )
 
 func TestTCPClientServer(t *testing.T) {
-	srv := &Server{
-		Handler: HandlerFunc(func(tx *Transaction) {
-			if tx.Message.Method == MethodBinding {
-				tx.WriteResponse(TypeResponse, Attributes{
-					AttrXorMappedAddress: tx.RemoteAddr(),
-				})
-			}
-		}),
-	}
+	srv := NewServer(nil)
 	l, err := net.Listen("tcp", "")
 	if err != nil {
 		t.Fatal("listen error", err)
@@ -24,14 +16,15 @@ func TestTCPClientServer(t *testing.T) {
 	defer l.Close()
 	go srv.Serve(l)
 
-	conn, err := Dial(l.Addr().Network(), l.Addr().String())
+	c, err := net.Dial(l.Addr().Network(), l.Addr().String())
 	if err != nil {
 		t.Fatal("dial error", err)
 	}
+	conn := NewClient(c, nil)
 	defer conn.Close()
 
 	req := &Message{Method: MethodBinding}
-	msg, err := conn.Exchange(req)
+	msg, err := conn.RoundTrip(req)
 	if err != nil {
 		t.Fatal("exchange error", err)
 	}
@@ -41,15 +34,7 @@ func TestTCPClientServer(t *testing.T) {
 }
 
 func TestUDPClientServer(t *testing.T) {
-	srv := &Server{
-		Handler: HandlerFunc(func(tx *Transaction) {
-			if tx.Message.Method == MethodBinding {
-				tx.WriteResponse(TypeResponse, Attributes{
-					AttrXorMappedAddress: tx.RemoteAddr(),
-				})
-			}
-		}),
-	}
+	srv := NewServer(nil)
 	l, err := net.ListenPacket("udp", "")
 	if err != nil {
 		t.Fatal("listen error", err)
@@ -57,14 +42,15 @@ func TestUDPClientServer(t *testing.T) {
 	defer l.Close()
 	go srv.ServePacket(l)
 
-	conn, err := Dial(l.LocalAddr().Network(), l.LocalAddr().String())
+	c, err := net.Dial(l.LocalAddr().Network(), l.LocalAddr().String())
 	if err != nil {
 		t.Fatal("dial error", err)
 	}
+	conn := NewClient(c, nil)
 	defer conn.Close()
 
 	req := &Message{Method: MethodBinding}
-	msg, err := conn.Exchange(req)
+	msg, err := conn.RoundTrip(req)
 	if err != nil {
 		t.Fatal("exchange error", err)
 	}
@@ -76,6 +62,24 @@ func TestUDPClientServer(t *testing.T) {
 	}
 }
 
+func TestLookupAddr(t *testing.T) {
+	srv := NewServer(nil)
+	l, err := net.ListenPacket("udp", "")
+	if err != nil {
+		t.Fatal("listen error", err)
+	}
+	defer l.Close()
+	go srv.ServePacket(l)
+
+	addr, err := Lookup("stun:"+l.LocalAddr().String(), "", "")
+	if err != nil {
+		t.Fatal("lookup", err)
+	}
+	if addr == nil {
+		t.Fatal("no address")
+	}
+}
+
 // Test Vectors for STUN. RFC 5769.
 
 func TestVectorsSampleRequest(t *testing.T) {
@@ -83,16 +87,14 @@ func TestVectorsSampleRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal("decode hex", err)
 	}
-	codec := &MessageCodec{
-		GetAuthKey: func(attrs Attributes) []byte {
-			return []byte("VOkJxbRl1RmTxUk/WvJxBt")
-		},
-	}
-	msg, err := codec.Decode(b)
-	if unk, ok := err.(ErrUnknownAttrs); ok && len(unk) == 1 && unk[0] == 0x24 {
-		err = nil
-	} else {
-		t.Fatal("unknown attributes")
+	dec := NewDecoder(nil)
+	msg, err := dec.Decode(b, []byte("VOkJxbRl1RmTxUk/WvJxBt"))
+	if unk, ok := err.(*ErrUnknownAttrs); ok {
+		if len(unk.Attributes) == 1 && unk.Attributes[0] == 0x24 {
+			err = nil
+		} else {
+			t.Fatal("unknown attributes")
+		}
 	}
 	if err != nil {
 		t.Fatal("decode error", err)
@@ -113,12 +115,8 @@ func TestVectorsSampleIPv4Response(t *testing.T) {
 	if err != nil {
 		t.Fatal("decode hex", err)
 	}
-	codec := &MessageCodec{
-		GetAuthKey: func(attrs Attributes) []byte {
-			return []byte("VOkJxbRl1RmTxUk/WvJxBt")
-		},
-	}
-	msg, err := codec.Decode(b)
+	dec := NewDecoder(nil)
+	msg, err := dec.Decode(b, []byte("VOkJxbRl1RmTxUk/WvJxBt"))
 	if err != nil {
 		t.Fatal("decode error", err)
 	}
@@ -139,12 +137,8 @@ func TestVectorsSampleIPv6Response(t *testing.T) {
 	if err != nil {
 		t.Fatal("decode hex", err)
 	}
-	codec := &MessageCodec{
-		GetAuthKey: func(attrs Attributes) []byte {
-			return []byte("VOkJxbRl1RmTxUk/WvJxBt")
-		},
-	}
-	msg, err := codec.Decode(b)
+	dec := NewDecoder(nil)
+	msg, err := dec.Decode(b, []byte("VOkJxbRl1RmTxUk/WvJxBt"))
 	if err != nil {
 		t.Fatal("decode error", err)
 	}
@@ -166,16 +160,17 @@ func TestVectorsSampleLongTermAuth(t *testing.T) {
 		t.Fatal("decode hex", err)
 	}
 	checked := false
-	codec := &MessageCodec{
-		GetAuthKey: func(attrs Attributes) []byte {
+	config := &Config{
+		GetAuthKey: func(attrs Attributes) ([]byte, error) {
 			checked = true
 			u, r := attrs.String(AttrUsername), attrs.String(AttrRealm)
 			h := md5.New()
 			h.Write([]byte(u + ":" + r + ":TheMatrIX"))
-			return h.Sum(nil)
+			return h.Sum(nil), nil
 		},
 	}
-	msg, err := codec.Decode(b)
+	dec := NewDecoder(config)
+	msg, err := dec.Decode(b, nil)
 	if err != nil {
 		t.Fatal("decode error", err)
 	}

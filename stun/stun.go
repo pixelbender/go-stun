@@ -1,43 +1,73 @@
 package stun
 
 import (
-	"fmt"
+	"crypto/md5"
+	"crypto/tls"
+	"errors"
 	"net"
+	"net/url"
+	"strings"
 )
 
-// Dial connects to the given network address using net.Dial, returning the STUN connection
-func Dial(network, address string) (*Conn, error) {
-	switch network {
-	case "tcp", "tcp4", "tcp6", "udp", "udp4", "udp6":
-		c, err := net.Dial(network, address)
-		if err != nil {
-			return nil, err
-		}
-		return NewConn(c, nil), err
+var ErrUnsupportedScheme = errors.New("stun: unsupported scheme")
+var ErrNoAddressResponse = errors.New("stun: no mapped address")
+
+// Lookup connects to the given STUN URI and makes the STUN binding request.
+// Returns the server reflexive transport address (mapped address).
+func Lookup(uri, username, password string) (*Addr, error) {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("stun: dial unsupported network %v", network)
+
+	var conn net.Conn
+	switch strings.ToLower(u.Scheme) {
+	case "stun":
+		conn, err = net.Dial("udp", GetServerAddress(u.Opaque, false))
+	case "stuns":
+		conn, err = tls.Dial("tcp", GetServerAddress(u.Opaque, true), nil)
+	default:
+		err = ErrUnsupportedScheme
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	c := NewClient(conn, &Config{GetAuthKey: LongTermAuthKey(username, password)})
+	defer c.Close()
+
+	msg, err := c.RoundTrip(&Message{Method: MethodBinding})
+	if err != nil {
+		return nil, err
+	}
+	if addr, ok := msg.Attributes[AttrXorMappedAddress]; ok {
+		return addr.(*Addr), nil
+	} else if addr, ok := msg.Attributes[AttrMappedAddress]; ok {
+		return addr.(*Addr), nil
+	}
+	return nil, ErrNoAddressResponse
 }
 
 // ListenAndServe listens on the network address and calls handler to serve requests.
 func ListenAndServe(network, addr string, handler Handler) error {
-	srv := &Server{Handler: handler}
+	srv := &Server{Config: DefaultConfig, Handler: handler}
 	return srv.ListenAndServe(network, addr)
 }
 
 // ListenAndServeTLS listens on the network address secured by TLS and calls handler to serve requests.
 func ListenAndServeTLS(network, addr string, certFile, keyFile string, handler Handler) error {
-	srv := &Server{Handler: handler}
+	srv := &Server{Config: DefaultConfig, Handler: handler}
 	return srv.ListenAndServeTLS(network, addr, certFile, keyFile)
 }
 
-// ServePacket accepts incoming STUN requests on the packet-oriented network listener and calls handler to serve requests.
-func ServePacket(l net.PacketConn, handler Handler) error {
-	srv := &Server{Handler: handler}
-	return srv.ServePacket(l)
-}
-
-// Serve accepts incoming STUN requests on the listener and calls handler to serve requests.
-func Serve(l net.Listener, handler Handler) error {
-	srv := &Server{Handler: handler}
-	return srv.Serve(l)
+func LongTermAuthKey(username, password string) func(attrs Attributes) ([]byte, error) {
+	return func(attrs Attributes) ([]byte, error) {
+		if attrs.Has(AttrRealm) {
+			attrs[AttrUsername] = username
+			h := md5.New()
+			h.Write([]byte(username + ":" + attrs.String(AttrRealm) + ":" + password))
+			return h.Sum(nil), nil
+		}
+		return nil, nil
+	}
 }

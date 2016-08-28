@@ -1,8 +1,6 @@
 package stun
 
-import (
-	"io"
-)
+import "reflect"
 
 // Error codes introduced by the RFC 5389 Section 15.6
 const (
@@ -53,38 +51,33 @@ func NewError(code int) *Error {
 	return &Error{Code: code, Reason: ErrorText(code)}
 }
 
-// String returns the string form of the error attribute.
-func (e *Error) String() string {
-	return e.Reason
-}
-
 type errorCodec struct{}
 
-func (errorCodec) Encode(m *Message, v interface{}, b []byte) (int, error) {
-	var code int
-	var reason string
-	switch a := v.(type) {
-	case Error:
-		code, reason = a.Code, a.Reason
+func (c errorCodec) Encode(w Writer, v interface{}) error {
+	switch attr := v.(type) {
+	case *Error:
+		c.writeErrorCode(w, attr.Code, attr.Reason)
 	default:
-		return DefaultAttrCodec.Encode(m, v, b)
+		return &errUnsupportedAttrType{Type: reflect.TypeOf(v)}
 	}
-	n := 4 + len(reason)
-	if len(b) < n {
-		return 0, io.EOF
-	}
+	return nil
+}
+
+func (c errorCodec) writeErrorCode(w Writer, code int, reason string) {
+	b := w.Next(4 + len(reason))
 	b[0] = 0
 	b[1] = 0
 	b[2] = byte(code / 100)
 	b[3] = byte(code % 100)
 	copy(b[4:], reason)
-	return n, nil
 }
 
-func (errorCodec) Decode(m *Message, b []byte) (interface{}, error) {
-	if len(b) < 4 {
-		return nil, io.EOF
+func (c errorCodec) Decode(r Reader) (interface{}, error) {
+	b, err := r.Next(4)
+	if err != nil {
+		return nil, err
 	}
 	code := int(b[2])*100 + int(b[3])
-	return &Error{code, string(b[4:])}, nil
+	b, _ = r.Next(r.Available())
+	return &Error{code, string(b)}, nil
 }
