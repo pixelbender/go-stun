@@ -1,4 +1,4 @@
-# Golang implementation of STUN, TURN and ICE Protocols
+# Golang: STUN, TURN and ICE Protocols
 
 [![Build Status](https://travis-ci.org/pixelbender/go-stun.svg)](https://travis-ci.org/pixelbender/go-stun)
 [![Coverage Status](https://coveralls.io/repos/github/pixelbender/go-stun/badge.svg?branch=master)](https://coveralls.io/github/pixelbender/go-stun?branch=master)
@@ -61,10 +61,10 @@ import (
 
 func main() {
 	conn, err := turn.Allocate("turn:example.org", "username", "password")
-	defer conn.Close()
 	if err != nil {
 		fmt.Println(err)
 	} else {
+	    defer conn.Close()
 		fmt.Println(conn.RelayedAddr())
 	}
 }
