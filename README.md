@@ -7,18 +7,17 @@
 
 ## Features
 
-- [x] STUN Message Encoder/Decoder
+- [x] STUN Encoder/Decoder
 - [x] STUN Client/Server
 - [x] STUN Authorization
-- [ ] STUN Redirect
-- [ ] STUN Service Discovery
-- [x] ICE STUN Attributes
-- [x] ICE STUN Errors
-- [ ] ICE Candidates gathering
+- [ ] STUN Transactions
+- [ ] STUN Multiplexing
+- [ ] STUN Redirection
+- [x] ICE Messages
+- [ ] ICE Agent
+- [ ] ICE Gathering
 - [ ] ICE Lite
-- [ ] ICE SDP Attributes
-- [x] TURN STUN Attributes
-- [x] TURN STUN Errors
+- [x] TURN Messages
 - [x] TURN Client
 - [ ] TURN Server
 - [ ] ...
@@ -29,7 +28,7 @@
 go get github.com/pixelbender/go-stun
 ```
 
-## STUN - Server reflexive transport address lookup
+## STUN: Server reflexive transport address discovery
 
 ```go
 package main
@@ -40,7 +39,7 @@ import (
 )
 
 func main() {
-	addr, err := stun.Lookup("stun:stun.l.google.com:19302", "username", "password")
+	addr, err := stun.Discover("stun:stun.l.google.com:19302", "username", "password")
 	if err != nil {
 		fmt.Println(err)
 	} else {
@@ -49,7 +48,7 @@ func main() {
 }
 ```
 
-## TURN - Relayed transport address allocation
+## TURN: Relayed transport address allocation
 
 ```go
 package main

@@ -1,7 +1,6 @@
 package ice
 
-import "github.com/pixelbender/go-stun/stun"
-
+/*
 // STUN attributes introduced by the RFC 5245 Section 19.1
 const (
 	AttrPriority       = uint16(0x0024)
@@ -54,3 +53,4 @@ func ErrorText(code int) string {
 	}
 	return stun.ErrorText(code)
 }
+*/

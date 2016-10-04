@@ -44,7 +44,6 @@ func NewServer(config *Config) *Server {
 }
 
 // ListenAndServe listens on the network address and calls handler to serve requests.
-// Accepted connections are configured to enable TCP keep-alives.
 func (srv *Server) ListenAndServe(network, addr string) error {
 	switch network {
 	case "tcp", "tcp4", "tcp6":
@@ -64,7 +63,6 @@ func (srv *Server) ListenAndServe(network, addr string) error {
 }
 
 // ListenAndServeTLS listens on the network address secured by TLS and calls handler to serve requests.
-// Accepted connections are configured to enable TCP keep-alives.
 func (srv *Server) ListenAndServeTLS(network, addr, certFile, keyFile string) error {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {

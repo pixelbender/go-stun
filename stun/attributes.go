@@ -3,50 +3,43 @@ package stun
 import (
 	"encoding/binary"
 	"fmt"
+	"github.com/pixelbender/go-stun/mux"
+	"net"
 	"reflect"
 	"strconv"
+	"time"
 )
 
-// Attributes introduced by the RFC 5389 Section 18.2.
 const (
-	AttrMappedAddress     = uint16(0x0001)
-	AttrXorMappedAddress  = uint16(0x0020)
-	AttrUsername          = uint16(0x0006)
-	AttrMessageIntegrity  = uint16(0x0008)
-	AttrErrorCode         = uint16(0x0009)
-	AttrRealm             = uint16(0x0014)
-	AttrNonce             = uint16(0x0015)
-	AttrUnknownAttributes = uint16(0x000a)
-	AttrSoftware          = uint16(0x8022)
-	AttrAlternateServer   = uint16(0x8023)
-	AttrFingerprint       = uint16(0x8028)
+	// Attributes introduced by the RFC 5389 Section 18.2.
+	AttrMappedAddress     attr = 0x0001
+	AttrXorMappedAddress  attr = 0x0020
+	AttrUsername          attr = 0x0006
+	AttrMessageIntegrity  attr = 0x0008
+	AttrErrorCode         attr = 0x0009
+	AttrRealm             attr = 0x0014
+	AttrNonce             attr = 0x0015
+	AttrUnknownAttributes attr = 0x000a
+	AttrSoftware          attr = 0x8022
+	AttrAlternateServer   attr = 0x8023
+	AttrFingerprint       attr = 0x8028
+
+	// Attributes introduced by the RFC 5780 Section 7.
+	AttrChangeRequest  attr = 0x0003
+	AttrPadding        attr = 0x0026
+	AttrResponsePort   attr = 0x0027
+	AttrResponseOrigin attr = 0x802b
+	AttrOtherAddress   attr = 0x802c
+
+	// Attributes introduced by the RFC 3489 Section 11.2 except listed above.
+	AttrResponseAddress attr = 0x0002
+	AttrSourceAddress   attr = 0x0004
+	AttrChangedAddress  attr = 0x0005
+	AttrPassword        attr = 0x0007
+	AttrReflectedFrom   attr = 0x000b
 )
 
-// Attributes introduced by the RFC 5780 Section 7.
-const (
-	AttrChangeRequest  = uint16(0x0003)
-	AttrPadding        = uint16(0x0026)
-	AttrResponsePort   = uint16(0x0027)
-	AttrResponseOrigin = uint16(0x802b)
-	AttrOtherAddress   = uint16(0x802c)
-)
-
-// Attributes introduced by the RFC 3489 Section 11.2 except listed above.
-const (
-	AttrResponseAddress = uint16(0x0002)
-	AttrSourceAddress   = uint16(0x0004)
-	AttrChangedAddress  = uint16(0x0005)
-	AttrPassword        = uint16(0x0007)
-	AttrReflectedFrom   = uint16(0x000b)
-)
-
-// Bits definition of CHANGE-REQUEST attribute.
-const (
-	ChangeIP   = uint32(0x4)
-	ChangePort = uint32(0x2)
-)
-
-var attrNames = map[uint16]string{
+var attrNames = map[attr]string{
 	AttrMappedAddress:     "MAPPED-ADDRESS",
 	AttrXorMappedAddress:  "XOR-MAPPED-ADDRESS",
 	AttrUsername:          "USERNAME",
@@ -70,185 +63,202 @@ var attrNames = map[uint16]string{
 	AttrReflectedFrom:     "REFLECTED-FROM",
 }
 
-// GetAttributeName returns a STUN attribute name.
-// It returns the empty string if the attribute is unknown.
-func GetAttributeName(at uint16) (n string) {
-	if n = attrNames[at]; n == "" {
-		n = "0x" + strconv.FormatUint(uint64(at), 16)
+var attrRegistry = map[uint16]attr {
+}
+
+func RegisterAttribute(at Attr) {
+	attrRegistry[at.Type()] = at
+}
+
+func GetAttribute(at uint16) Attr {
+	return attrRegistry[at]
+}
+
+type attr uint16
+
+func (at attr) Type() uint16 {
+	return uint16(at)
+}
+
+func (at attr) Decode(m *Message, r mux.Reader) (v interface{}, err error) {
+	var b []byte
+	switch at {
+	case AttrMappedAddress, AttrXorMappedAddress, AttrAlternateServer, AttrResponseOrigin, AttrOtherAddress, AttrResponseAddress, AttrSourceAddress, AttrChangedAddress, AttrReflectedFrom:
+		if b, err = r.Next(4); err != nil {
+			return
+		}
+		n, port := net.IPv4len, int(be.Uint16(b[2:]))
+		if b[1] == 0x02 {
+			n = net.IPv6len
+		}
+		if b, err = r.Next(n); err != nil {
+			return
+		}
+		ip := make([]net.IP, len(b))
+		if at == AttrXorMappedAddress {
+			for i, it := range b {
+				ip[i] = it ^ m.Transaction[i]
+			}
+			port = port ^ 0x2112
+		} else {
+			copy(ip, b)
+		}
+		return &Addr{IP: ip, Port: port}, nil
+	case AttrErrorCode:
+		if b, err = r.Next(4); err != nil {
+			return
+		}
+		v = &ErrorCode{
+			Code:   int(b[2])*100 + int(b[3]),
+			Reason: string(r.Bytes()),
+		}
+	case AttrUnknownAttributes:
+		attrs := make(unknownAttributes, 0, r.Buffered()>>1)
+		for r.Buffered() > 2 {
+			b, _ := r.Next(2)
+			attrs = append(attrs, be.Uint16(b))
+		}
+	case AttrUsername, AttrRealm, AttrNonce, AttrSoftware, AttrPassword:
+		v = string(r.Bytes())
+	case AttrFingerprint, AttrChangeRequest:
+		if b, err = r.Next(4); err != nil {
+			return
+		}
+		v = be.Uint32(b)
 	}
 	return
 }
 
-// AttrCodec interface represents a STUN attribute encoder/decoder.
-type AttrCodec interface {
-	Encode(w Writer, v interface{}) error
-	Decode(r Reader) (interface{}, error)
-}
-
-var attrCodecs = map[uint16]AttrCodec{
-	AttrMappedAddress:     AddrCodec,
-	AttrXorMappedAddress:  XorAddrCodec,
-	AttrUsername:          StringCodec,
-	AttrMessageIntegrity:  RawCodec,
-	AttrErrorCode:         errorCodec{},
-	AttrRealm:             StringCodec,
-	AttrNonce:             StringCodec,
-	AttrUnknownAttributes: unkAttrCodec{},
-	AttrSoftware:          StringCodec,
-	AttrAlternateServer:   AddrCodec,
-	AttrFingerprint:       uint32Codec{},
-	AttrChangeRequest:     uint32Codec{},
-	AttrPadding:           RawCodec,
-	AttrResponsePort:      portCodec{},
-	AttrResponseOrigin:    AddrCodec,
-	AttrOtherAddress:      AddrCodec,
-	AttrResponseAddress:   AddrCodec,
-	AttrSourceAddress:     AddrCodec,
-	AttrChangedAddress:    AddrCodec,
-	AttrPassword:          StringCodec,
-	AttrReflectedFrom:     AddrCodec,
-}
-
-// GetAttributeCodec returns a STUN attribute codec for TURN.
-// It returns the nil if the attribute type is unknown.
-func GetAttributeCodec(at uint16) AttrCodec {
-	return attrCodecs[at]
-}
-
-type errUnsupportedAttrType struct {
-	reflect.Type
-}
-
-func (err errUnsupportedAttrType) Error() string {
-	return "stun: unsupported attribute type: " + reflect.Type(err).String()
-}
-
-// ErrUnknownAttrs is returned when a STUN message contains unknown comprehension-required attributes.
-type errUnknownAttrCodec struct {
-	Type uint16
-}
-
-func (err errUnknownAttrCodec) Error() string {
-	return "stun: no codec for attribute " + GetAttributeName(err.Type) + " is defined"
-}
-
-// Attributes represents a set of STUN attributes.
-type Attributes map[uint16]interface{}
-
-func (at Attributes) Has(id uint16) (ok bool) {
-	_, ok = at[id]
-	return
-}
-
-func (at Attributes) String(id uint16) string {
-	r, ok := at[id]
-	if ok {
-		switch v := r.(type) {
-		case []byte:
-			return string(v)
-		case string:
-			return v
-		case (fmt.Stringer):
-			return v.String()
-		default:
-			return fmt.Sprintf("%", r)
+func (at attr) Encode(m *Message, v interface{}, w mux.Writer) error {
+	if raw, ok := v.([]byte); ok {
+		copy(w.Next(len(raw)), raw)
+	}
+	switch at {
+	case AttrMappedAddress, AttrXorMappedAddress, AttrAlternateServer, AttrResponseOrigin, AttrOtherAddress, AttrResponseAddress, AttrSourceAddress, AttrChangedAddress, AttrReflectedFrom:
+		if addr, ok := v.(*Addr); ok {
+			fam, sh := byte(0x01), addr.IP.To4()
+			if len(sh) == 0 {
+				fam, sh = byte(0x02), addr.IP
+			}
+			b := w.Next(4 + len(sh))
+			b[0] = 0
+			b[1] = fam
+			if at == AttrXorMappedAddress {
+				be.PutUint16(b[2:], uint16(addr.Port)^0x2112)
+				b = b[4:]
+				for i, it := range sh {
+					b[i] = it ^ m.Transaction[i]
+				}
+			} else {
+				be.PutUint16(b[2:], uint16(addr.Port))
+				copy(b[4:], sh)
+			}
+		}
+	case AttrErrorCode:
+		if err, ok := v.(*ErrorCode); ok {
+			b := w.Next(4 + len(err.Reason))
+			b[0] = 0
+			b[1] = 0
+			b[2] = byte(err.Code / 100)
+			b[3] = byte(err.Code % 100)
+			copy(b[4:], err.Reason)
+		}
+	case AttrUnknownAttributes:
+		if attrs, ok := v.(unknownAttributes); ok {
+			b := w.Next(len(attrs) << 1)
+			for i, it := range attrs {
+				be.PutUint16(b[i<<1:], it)
+			}
+		}
+	case AttrUsername, AttrRealm, AttrNonce, AttrSoftware, AttrPassword:
+		if s, ok := v.(string); ok {
+			copy(w.Next(len(s)), s)
+		}
+	case AttrFingerprint, AttrChangeRequest:
+		if u, ok := v.(uint32); ok {
+			be.PutUint32(w.Next(4), u)
 		}
 	}
-	return ""
-}
-
-// RawCodec encodes and decodes a STUN attribute as a raw byte array.
-const RawCodec = rawCodec(false)
-
-// StringCodec encodes and decodes a STUN attribute as a string.
-const StringCodec = rawCodec(true)
-
-type rawCodec bool
-
-func (c rawCodec) Encode(w Writer, v interface{}) error {
-	switch attr := v.(type) {
-	case []byte:
-		copy(w.Next(len(attr)), attr)
-	case string:
-		copy(w.Next(len(attr)), attr)
-	default:
-		return &errUnsupportedAttrType{Type: reflect.TypeOf(v)}
-	}
 	return nil
 }
 
-func (c rawCodec) Decode(r Reader) (interface{}, error) {
-	b, _ := r.Next(r.Available())
-	if c {
-		return string(b), nil
+func (at attr) String() string {
+	if v, ok := attrNames[at]; ok {
+		return v
 	}
-	return b, nil
+	return fmt.Sprintf("0x%4x", at)
 }
 
-type unkAttrCodec struct{}
-
-func (c unkAttrCodec) Encode(w Writer, v interface{}) error {
-	switch attr := v.(type) {
-	case []uint16:
-		c.writeAttributeTypes(w, attr)
-	case ErrUnknownAttrs:
-		c.writeAttributeTypes(w, attr.Attributes)
-	default:
-		return &errUnsupportedAttrType{Type: reflect.TypeOf(v)}
-	}
-	return nil
+// ErrorCode represents the ERROR-CODE attribute.
+type ErrorCode struct {
+	Code   int
+	Reason string
 }
 
-func (c unkAttrCodec) writeAttributeTypes(w Writer, attrs []uint16) {
-	b := w.Next(len(attrs) << 1)
-	for i, it := range attrs {
-		be.PutUint16(b[i<<1:], it)
-	}
+func (c *ErrorCode) String() string {
+	return c.Reason
 }
 
-func (c unkAttrCodec) Decode(r Reader) (interface{}, error) {
-	b, _ := r.Next(r.Available())
-	attrs := make([]uint16, len(b)>>1)
-	for i := range attrs {
-		attrs[i] = be.Uint16(b[i<<1:])
-	}
-	return &ErrUnknownAttrs{attrs}, nil
+// Addr represents a transport address attribute.
+type Addr struct {
+	IP   net.IP
+	Port int
 }
 
-type uint32Codec struct{}
-
-func (c uint32Codec) Encode(w Writer, v interface{}) error {
-	if v, ok := v.(uint32); ok {
-		be.PutUint32(w.Next(4), v)
-		return nil
-	}
-	return &errUnsupportedAttrType{Type: reflect.TypeOf(v)}
+func (addr *Addr) String() string {
+	return net.JoinHostPort(addr.IP.String(), strconv.Itoa(addr.Port))
 }
 
-func (c uint32Codec) Decode(r Reader) (interface{}, error) {
-	b, err := r.Next(4)
-	if err != nil {
-		return nil, err
-	}
-	return be.Uint32(b), nil
+type unknownAttributes []uint16
+
+const (
+	// Error codes introduced by the RFC 5389 Section 15.6
+	ErrTryAlternate     code = 300
+	ErrBadRequest       code = 400
+	ErrUnauthorized     code = 401
+	ErrUnknownAttribute code = 420
+	ErrStaleNonce       code = 438
+	ErrServerError      code = 500
+
+	// Error codes introduced by the RFC 3489 Section 11.2.9 except listed in RFC 5389.
+	ErrStaleCredentials      code = 430
+	ErrIntegrityCheckFailure code = 431
+	ErrMissingUsername       code = 432
+	ErrUseTLS                code = 433
+	ErrGlobalFailure         code = 600
+)
+
+var errorText = map[code]string{
+	ErrTryAlternate:          "Try alternate",
+	ErrBadRequest:            "Bad request",
+	ErrUnauthorized:          "Unauthorized",
+	ErrUnknownAttribute:      "Unknown attribute",
+	ErrStaleCredentials:      "Stale credentials",
+	ErrIntegrityCheckFailure: "Integrity check failure",
+	ErrMissingUsername:       "Missing username",
+	ErrUseTLS:                "Use TLS",
+	ErrStaleNonce:            "Stale nonce",
+	ErrServerError:           "Server error",
+	ErrGlobalFailure:         "Global failure",
 }
 
-type portCodec struct{}
 
-func (c portCodec) Encode(w Writer, v interface{}) error {
-	if v, ok := v.(int); ok {
-		be.PutUint16(w.Next(2), uint16(v))
-		return nil
-	}
-	return &errUnsupportedAttrType{Type: reflect.TypeOf(v)}
+
+type code int
+
+func (c code) Code() int {
+	return int(c)
 }
 
-func (c portCodec) Decode(r Reader) (interface{}, error) {
-	b, err := r.Next(2)
-	if err != nil {
-		return nil, err
-	}
-	return int(be.Uint16(b)), nil
+func (c code) Error() string {
+	return errorText[c]
 }
 
 var be = binary.BigEndian
+
+
+func init() {
+	for at := range attrNames {
+		RegisterAttribute(at)
+	}
+}

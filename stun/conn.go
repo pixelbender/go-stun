@@ -1,176 +1,152 @@
 package stun
 
 import (
-	"bufio"
 	"io"
 	"net"
 	"time"
+	"bytes"
+	"crypto/rand"
+	"sync"
+	"errors"
+	"github.com/pixelbender/go-stun/mux"
+	"net/http"
+	"crypto/hmac"
+	"crypto/sha1"
+	"github.com/prometheus/common/config"
 )
 
-// Config represents a STUN connection configuration.
-type Config struct {
-	// GetAuthKey returns a key for a MESSAGE-INTEGRITY attribute generation and validation.
-	// Key = MD5(username ":" realm ":" SASLprep(password)) for long-term credentials.
-	// Key = SASLprep(password) for short-term credentials.
-	// SASLprep is defined in RFC 4013.
-	// The Username and Password fields are ignored if GetAuthKey is defined.
-	GetAuthKey func(attrs Attributes) ([]byte, error)
-
-	// GetAttributeCodec returns STUN attribute codec for the specified attribute type.
-	// Using stun.GetAttributeCodec if GetAttributeCodec is nil.
-	GetAttributeCodec func(at uint16) AttrCodec
-
-	// Fingerprint controls whether a FINGERPRINT attribute will be generated.
-	Fingerprint bool
-
-	// Software is a value for SOFTWARE attribute.
-	Software string
-}
-
-func (c *Config) getAuthKey(attrs Attributes) ([]byte, error) {
-	if c != nil && c.GetAuthKey != nil {
-		return c.GetAuthKey(attrs)
-	}
-	return nil, nil
-}
-
-func (c *Config) getAttrCodec(at uint16) AttrCodec {
-	if c != nil && c.GetAttributeCodec != nil {
-		return c.GetAttributeCodec(at)
-	}
-	return GetAttributeCodec(at)
-}
-
-var DefaultConfig = &Config{
-	GetAttributeCodec: GetAttributeCodec,
-}
 
 // A Conn represents the STUN connection and implements the STUN protocol over net.Conn interface.
 type Conn struct {
-	net.Conn
-	config   *Config
-	dec      *Decoder
-	enc      *Encoder
-	cr       connReader
-	reliable bool
-	key      []byte
+	mux.Conn
+	config *Config
+	key    []byte
 }
 
-// NewConn creates a Conn connection over the c with specified configuration.
+// NewConn creates a STUN connection over the net.Conn with specified configuration.
 func NewConn(inner net.Conn, config *Config) *Conn {
-	if config == nil {
-		config = DefaultConfig
+	c := &Conn{}
+	m := &mux.Mux{}
+	c.Conn = mux.ServeConn(inner, m)
+	m.Handle()
+	return NewConnMux(mux.ServeConn(inner, m), m, config)
+}
+
+// NewConnMux creates a STUN connection over the multiplexed connection with specified configuration.
+func NewConnMux(c mux.Conn, config *Config) *Conn {
+	return &Conn{Conn:c, config:config}
+}
+
+func (c *Conn) Handle(c mux.Conn, r mux.Reader) error {
+
+}
+
+// Decode reads and decodes the STUN message from r.
+// Returns ErrUnknownAttrs if the STUN message contains comprehension-required attributes that are not decoded.
+// Ignores optional attributes if not decoded.
+func (c *Conn) Decode(r mux.Reader, key []byte) (m *Message, err error) {
+	var b []byte
+	if b, err = r.Peek(20); err != nil {
+		return
 	}
-	c := &Conn{
-		Conn:   inner,
-		config: config,
-		dec:    NewDecoder(config),
-		enc:    NewEncoder(config),
+	n := int(be.Uint16(b[2:])) + 20
+	if r, err = r.Reader(n); err != nil {
+		return
 	}
-	if _, ok := inner.(net.PacketConn); ok {
-		c.cr = newPacketReader(inner)
-		c.reliable = false
+	m = &Message{
+		Method:      be.Uint16(b),
+		Transaction: b[4:20],
+	}
+	var unknown ErrUnknownAttrs
+	var ar mux.Reader
+	b = r.Bytes()
+	r.Next(20)
+	p := 20
+	for r.Buffered() > 4 {
+		ah, _ := r.Next(4)
+		at, n := be.Uint16(ah), int(be.Uint16(ah[2:]) + 4)
+		if ar, err = r.Reader(n); err != nil {
+			return
+		}
+		if attr := c.config.GetAttribute(at); attr == nil {
+			if at < 0x8000 {
+				unknown = append(unknown, at)
+			}
+		} else if err = attr.Decode(m, ar); err != nil {
+			return
+		} else if attr == AttrMessageIntegrity {
+			be.PutUint16(b[2:], uint16(p + 4))
+			m.raw = b[:p]
+			break
+		} else if attr == AttrFingerprint {
+			be.PutUint16(b[2:], uint16(p + 12))
+			m.raw = b[:p]
+			break
+		}
+		if pad := n & 3; pad != 0 {
+			p += n + 8 - pad
+		} else {
+			p += n + 4
+		}
+	}
+	if len(unknown) > 0 {
+		err = unknown
+	}
+	return
+}
+
+func (c *Conn) Encode(w mux.Writer, m *Message) (err error) {
+	h := w.Header(20)
+	b := h.Bytes()
+	be.PutUint16(b, m.Method)
+	copy(b[4:], m.Transaction)
+
+	for at, v := range m.Attributes {
+		if at == AttrFingerprint || at == AttrMessageIntegrity {
+			continue
+		}
+		ah := w.Header(4)
+		if err = at.Encode(m, v, w); err != nil {
+			return
+		}
+		b = ah.Bytes()
+		be.PutUint16(b, at.Type())
+		be.PutUint16(b[2:], uint16(ah.Payload()))
+
+		// Padding
+		if mod := n & 3; mod != 0 {
+			b = w.Next(4 - mod)
+			for i := range b {
+				b[i] = 0
+			}
+		}
+	}
+
+	if m.Key != nil {
+		data := w.Bytes()[s:]
+		p := w.Next(24)
+		b := w.Bytes()[s:]
+		be.PutUint16(b[2:], uint16(len(b)-20))
+		be.PutUint16(p, AttrMessageIntegrity)
+		be.PutUint16(p[2:], 20)
+		integrity(data, m.Key, p[4:4])
+	} else if fingerprint {
+		data := w.Bytes()[s:]
+		p := w.Next(8)
+		b := w.Bytes()[s:]
+		be.PutUint16(b[2:], uint16(len(b)-20))
+		be.PutUint16(p, AttrFingerprint)
+		be.PutUint16(p[2:], 4)
+		be.PutUint32(p[4:], fingerprint(data))
 	} else {
-		c.cr = newStreamReader(inner)
-		c.reliable = true
-	}
-	return c
-}
-
-// ReadMessage reads STUN messages from the connection.
-func (c *Conn) ReadMessage() (*Message, error) {
-	b, err := c.cr.PeekMessageBytes()
-	if err != nil {
-		return nil, err
-	}
-	msg, err := c.dec.Decode(b, c.key)
-	return msg, err
-}
-
-// WriteMessage writes the STUN message to the connection.
-func (c *Conn) WriteMessage(msg *Message) error {
-	b, err := c.enc.Encode(msg)
-	if err != nil {
-		return err
-	}
-	if _, err = c.Write(b); err != nil {
-		return err
-	}
-	return nil
-}
-
-type connReader interface {
-	// PeekMessageBytes returns the bytes, containing a STUN message.
-	// The bytes stop being valid at the next read call.
-	PeekMessageBytes() ([]byte, error)
-}
-
-var bufferSize = 1400
-
-// streamReader reads a STUN message transmitted over a stream-oriented network.
-type streamReader struct {
-	*bufio.Reader
-	r    io.Reader
-	skip int
-}
-
-func newStreamReader(r io.Reader) *streamReader {
-	if tcp, ok := r.(*net.TCPConn); ok {
-		tcp.SetKeepAlive(true)
-		tcp.SetKeepAlivePeriod(30 * time.Second)
-	}
-	return &streamReader{bufio.NewReaderSize(r, bufferSize), r, 0}
-}
-
-func (c *streamReader) Read(b []byte) (int, error) {
-	c.discard()
-	return c.Read(b)
-}
-
-func (c *streamReader) PeekMessageBytes() ([]byte, error) {
-	c.discard()
-	h, err := c.Peek(4)
-	if err != nil {
-		return nil, err
-	}
-	if be.Uint16(h)&0xc000 != 0 {
-		return nil, ErrFormat
-	}
-	n := int(be.Uint16(h[2:])) + 20
-	b, err := c.Peek(n)
-	if err != nil {
-		return nil, err
-	}
-	c.skip = n
-	return b, nil
-}
-
-func (c *streamReader) discard() {
-	if c.skip > 0 {
-		c.Discard(c.skip)
-		c.skip = 0
+		b := w.Bytes()[s:]
+		be.PutUint16(b[2:], uint16(len(b)-20))
 	}
 }
 
-// packetConn reads a STUN message transmitted over a packet-oriented network.
-type packetReader struct {
-	io.Reader
-	buf []byte
+func (c *Conn) EncodeAttribute(w mux.Writer, m *Message) (err error) {
+
 }
 
-func newPacketReader(r io.Reader) *packetReader {
-	return &packetReader{r, make([]byte, bufferSize)}
-}
-
-func (c *packetReader) PeekMessageBytes() ([]byte, error) {
-	n, err := c.Read(c.buf)
-	if err != nil {
-		return nil, err
-	}
-	b := c.buf[:n]
-	l := int(be.Uint16(b[2:])) + 20
-	if n < l {
-		return nil, ErrTruncated
-	}
-	return b, nil
-}
+var ErrTimeout = errors.New("request timeout")
+var ErrCancelled = errors.New("request is cancelled")

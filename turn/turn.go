@@ -9,9 +9,6 @@ import (
 	"strings"
 )
 
-var ErrUnsupportedScheme = errors.New("turn: unsupported scheme")
-var ErrNoAllocationResponse = errors.New("turn: no allocated address")
-
 // Allocate connects to the given TURN URI and makes the TURN allocation request.
 // Returns the relayed transport address.
 func Allocate(uri, username, password string) (*Conn, error) {
@@ -28,31 +25,53 @@ func Allocate(uri, username, password string) (*Conn, error) {
 		if p.Get("transport") == "tcp" {
 			network = "tcp"
 		}
-		conn, err = net.Dial(network, stun.GetServerAddress(u.Opaque, false))
+		conn, err = net.Dial(network, getServerAddress(u.Opaque, false))
 	case "turns":
-		conn, err = tls.Dial("tcp", stun.GetServerAddress(u.Opaque, true), nil)
+		conn, err = tls.Dial("tcp", getServerAddress(u.Opaque, true), nil)
 	default:
-		err = ErrUnsupportedScheme
+		err = errUnsupportedScheme
 	}
 	if err != nil {
 		return nil, err
 	}
-	c := stun.NewClient(conn, &stun.Config{
-		GetAuthKey:        stun.LongTermAuthKey(username, password),
-		GetAttributeCodec: GetAttributeCodec,
-	})
+	config := new(Config)
+	config.GetAuthKey = stun.LongTermAuthKey(username, password)
 
-	msg, err := c.RoundTrip(&stun.Message{
-		Method: MethodAllocate,
-		Attributes: stun.Attributes{
-			AttrRequestedTransport: AllocationUDP,
-		},
-	})
+	c, err := NewConn(conn, config)
 	if err != nil {
+		c.Close()
 		return nil, err
 	}
-	if addr, ok := msg.Attributes[AttrXorRelayedAddress]; ok {
-		return NewConn(c, addr.(*stun.Addr)), nil
+	return c, nil
+}
+
+// ListenAndServe listens on the network address and calls handler to serve requests.
+func ListenAndServe(network, addr string, handler stun.Handler) error {
+	srv := NewServer()
+	srv.Handler = handler
+	return srv.ListenAndServe(network, addr)
+}
+
+// ListenAndServeTLS listens on the network address secured by TLS and calls handler to serve requests.
+func ListenAndServeTLS(network, addr string, certFile, keyFile string, handler stun.Handler) error {
+	srv := NewServer()
+	srv.Handler = handler
+	return srv.ListenAndServeTLS(network, addr, certFile, keyFile)
+}
+
+var errUnsupportedScheme = errors.New("turn: unsupported scheme")
+
+func getServerAddress(hostport string, secure bool) string {
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = hostport
 	}
-	return nil, ErrNoAllocationResponse
+	if port == "" {
+		if secure {
+			port = "5478"
+		} else {
+			port = "3478"
+		}
+	}
+	return net.JoinHostPort(host, port)
 }

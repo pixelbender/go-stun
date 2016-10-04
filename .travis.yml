@@ -1,12 +1,13 @@
 language: go
 sudo: false
 go:
-  - 1.6
+  - tip
 before_install:
   - go get github.com/mattn/goveralls
   - go get golang.org/x/tools/cmd/cover
   - go get github.com/golang/lint/golint
 script:
+  - go test -v -coverprofile=mux.coverprofile ./mux
   - go test -v -coverprofile=stun.coverprofile ./stun
   - go test -v -coverprofile=turn.coverprofile ./turn
   - go test -v -coverprofile=ice.coverprofile ./ice

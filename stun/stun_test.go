@@ -7,6 +7,7 @@ import (
 	"testing"
 )
 
+/*
 func TestTCPClientServer(t *testing.T) {
 	srv := NewServer(nil)
 	l, err := net.Listen("tcp", "")
@@ -71,14 +72,14 @@ func TestLookupAddr(t *testing.T) {
 	defer l.Close()
 	go srv.ServePacket(l)
 
-	addr, err := Lookup("stun:"+l.LocalAddr().String(), "", "")
+	addr, err := Discover("stun:"+l.LocalAddr().String(), "", "")
 	if err != nil {
 		t.Fatal("lookup", err)
 	}
 	if addr == nil {
 		t.Fatal("no address")
 	}
-}
+}*/
 
 // Test Vectors for STUN. RFC 5769.
 
@@ -102,10 +103,10 @@ func TestVectorsSampleRequest(t *testing.T) {
 	if !msg.IsType(TypeRequest) || msg.Method&^0x110 != MethodBinding {
 		t.Fatal("message type error", msg.Method)
 	}
-	if v := msg.Attributes.String(AttrSoftware); v != "STUN test client" {
+	if v := msg.GetString(AttrSoftware); v != "STUN test client" {
 		t.Fatal("software check", v)
 	}
-	if v := msg.Attributes.String(AttrUsername); v != "evtj:h6vY" {
+	if v := msg.GetString(AttrUsername); v != "evtj:h6vY" {
 		t.Fatal("username check", v)
 	}
 }

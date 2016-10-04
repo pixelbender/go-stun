@@ -2,190 +2,174 @@ package turn
 
 import (
 	"encoding/binary"
+	"fmt"
+	"github.com/pixelbender/go-stun/mux"
 	"github.com/pixelbender/go-stun/stun"
+	"golang.org/x/tools/go/gcimporter15/testdata"
+	"io"
+	"net"
 	"reflect"
+	"strconv"
+	"time"
 )
 
-// STUN methods introduced by the RFC 5766 Section 13.
 const (
-	MethodAllocate         = uint16(0x3)
-	MethodRefresh          = uint16(0x4)
-	MethodSend             = uint16(0x6)
-	MethodData             = uint16(0x7)
-	MethodCreatePermission = uint16(0x8)
-	MethodChannelBind      = uint16(0x9)
+	// TURN allocation transport types
+	allocUDP uint8 = 17
+	allocTCP uint8 = 6
 )
 
-// STUN attributes introduced by the RFC 5766 Section 14.
 const (
-	AttrChannelNumber      = uint16(0x000c)
-	AttrLifeTime           = uint16(0x000d)
-	AttrXorPeerAddress     = uint16(0x0012)
-	AttrData               = uint16(0x0013)
-	AttrXorRelayedAddress  = uint16(0x0016)
-	AttrEvenPort           = uint16(0x0018)
-	AttrRequestedTransport = uint16(0x0019)
-	AttrDontFragment       = uint16(0x001a)
-	AttrReservationToken   = uint16(0x0022)
+	// TURN methods introduced by the RFC 5766 Section 13.
+	methodAllocate         uint16 = 0x3
+	methodRefresh          uint16 = 0x4
+	methodSend             uint16 = 0x6
+	methodData             uint16 = 0x7
+	methodCreatePermission uint16 = 0x8
+	methodChannelBind      uint16 = 0x9
+
+	// TURN methods introduced by the RFC 6062 Section 6.1.
+	methodConnect        uint16 = 0xa
+	methodConnectionBind uint16 = 0xb
+	methodSend           uint16 = 0xc
 )
 
-var attrNames = map[uint16]string{
-	AttrChannelNumber:      "CHANNEL-NUMBER",
-	AttrLifeTime:           "LIFETIME",
-	AttrXorPeerAddress:     "XOR-PEER-ADDRESS",
-	AttrData:               "DATA",
-	AttrXorRelayedAddress:  "XOR-RELAYED-ADDRESS",
-	AttrEvenPort:           "EVEN-PORT",
-	AttrRequestedTransport: "REQUESTED-TRANSPORT",
-	AttrDontFragment:       "DONT-FRAGMENT",
-	AttrReservationToken:   "RESERVATION-TOKEN",
+const (
+	// TURN attributes introduced by the RFC 5766 Section 14.
+	attrChannelNumber      attr = 0x000c
+	attrLifeTime           attr = 0x000d
+	attrXorPeerAddress     attr = 0x0012
+	attrData               attr = 0x0013
+	attrXorRelayedAddress  attr = 0x0016
+	attrEvenPort           attr = 0x0018
+	attrRequestedTransport attr = 0x0019
+	attrDontFragment       attr = 0x001a
+	attrReservationToken   attr = 0x0022
+
+	// TURN attribute introduced by the RFC 6062 Section 6.2.
+	attrConnectionId attr = 0x000c
+)
+
+var attrNames = map[attr]string{
+	attrChannelNumber:      "CHANNEL-NUMBER",
+	attrLifeTime:           "LIFETIME",
+	attrXorPeerAddress:     "XOR-PEER-ADDRESS",
+	attrData:               "DATA",
+	attrXorRelayedAddress:  "XOR-RELAYED-ADDRESS",
+	attrEvenPort:           "EVEN-PORT",
+	attrRequestedTransport: "REQUESTED-TRANSPORT",
+	attrDontFragment:       "DONT-FRAGMENT",
+	attrReservationToken:   "RESERVATION-TOKEN",
+	attrConnectionId:       "CONNECTION-ID",
 }
 
-// GetAttributeName returns a STUN attribute name.
-// It returns the empty string if the attribute is unknown.
-func GetAttributeName(at uint16) (n string) {
-	if n = attrNames[at]; n == "" {
-		n = stun.GetAttributeName(at)
+type attr uint16
+
+func (at attr) Decode(m *stun.Message, r mux.Reader) (v interface{}, err error) {
+	var b []byte
+	switch at {
+	case attrChannelNumber:
+		if b, err = r.Next(4); err == nil {
+			v = be.Uint16(b)
+		}
+	case attrLifeTime:
+		if b, err = r.Next(4); err == nil {
+			v = time.Second * time.Duration(be.Uint32(b))
+		}
+	case attrXorPeerAddress, attrXorRelayedAddress:
+		v, err = stun.AttrXorMappedAddress.Decode(r)
+	case attrEvenPort:
+		if b, err = r.Next(1); err == nil {
+			v = b[0]&0x80 != 0
+		}
+	case attrRequestedTransport:
+		if b, err = r.Next(4); err == nil {
+			v = b[0]
+		}
+	case attrDontFragment:
+		v = true
+	case attrData, attrReservationToken:
+		v, err = r.Next(r.Buffered())
+	case attrConnectionId:
+		if b, err = r.Next(4); err == nil {
+			v = be.Uint32(b)
+		}
 	}
 	return
 }
 
-var attrCodecs = map[uint16]stun.AttrCodec{
-	AttrChannelNumber:      channelCodec{},
-	AttrLifeTime:           uint32Codec{},
-	AttrXorPeerAddress:     stun.XorAddrCodec,
-	AttrData:               stun.RawCodec,
-	AttrXorRelayedAddress:  stun.XorAddrCodec,
-	AttrEvenPort:           evenPortCodec{},
-	AttrRequestedTransport: transportCodec{},
-	AttrDontFragment:       emptyCodec{},
-	AttrReservationToken:   stun.RawCodec,
-}
-
-// GetAttributeCodec returns a STUN attribute codec for TURN.
-func GetAttributeCodec(at uint16) (c stun.AttrCodec) {
-	if c = attrCodecs[at]; c == nil {
-		c = stun.GetAttributeCodec(at)
+func (at attr) Encode(m *stun.Message, v interface{}, w mux.Writer) error {
+	if raw, ok := v.([]byte); ok {
+		w.Write(raw)
 	}
-	return
+	switch at {
+	case attrChannelNumber:
+		be.PutUint32(w.Next(4), uint32(v.(uint16))<<16)
+	case attrLifeTime:
+		be.PutUint32(w.Next(4), uint32(v.(time.Duration).Seconds()))
+	case attrXorPeerAddress, attrXorRelayedAddress:
+		stun.AttrXorMappedAddress.Encode(v, w)
+	case attrEvenPort:
+		if v.(bool) == true {
+			w.Next(1)[0] = 0x80
+		} else {
+			w.Next(1)[0] = 0
+		}
+	case attrRequestedTransport:
+		be.PutUint32(w.Next(4), uint32(v.(uint8))<<24)
+	case attrConnectionId:
+		be.PutUint32(w.Next(4), v.(uint32))
+	}
 }
 
-// STUN errors introduced by the RFC 5766 Section 15.
+func (at attr) String() string {
+	if v, ok := attrNames[at]; ok {
+		return v
+	}
+	return fmt.Sprintf("0x%4x", at)
+}
+
+type message stun.Message
+
 const (
-	CodeForbidden                    = 403
-	CodeAllocationMismatch           = 437
-	CodeWrongCredentials             = 441
-	CodeUnsupportedTransportProtocol = 442
-	CodeAllocationQuotaReached       = 486
-	CodeInsufficientCapacity         = 508
+	// STUN errors introduced by the RFC 5766 Section 15.
+	ErrForbidden                    code = 403
+	ErrAllocationMismatch           code = 437
+	ErrWrongCredentials             code = 441
+	ErrUnsupportedTransportProtocol code = 442
+	ErrAllocationQuotaReached       code = 486
+	ErrInsufficientCapacity         code = 508
+
+	// STUN errors introduced by the RFC 6062 Section 6.3.
+	ErrConnectionAlreadyExists    code = 446
+	ErrConnectionTimeoutOrFailure code = 447
 )
 
-var errorText = map[int]string{
-	CodeForbidden:                    "Forbidden",
-	CodeAllocationMismatch:           "Allocation Mismatch",
-	CodeWrongCredentials:             "Wrong Credentials",
-	CodeUnsupportedTransportProtocol: "Unsupported Transport Protocol",
-	CodeAllocationQuotaReached:       "Allocation Quota Reached",
-	CodeInsufficientCapacity:         "Insufficient Capacity",
+var errorText = map[code]string{
+	ErrForbidden:                    "Forbidden",
+	ErrAllocationMismatch:           "Allocation mismatch",
+	ErrWrongCredentials:             "Wrong credentials",
+	ErrUnsupportedTransportProtocol: "Unsupported transport protocol",
+	ErrAllocationQuotaReached:       "Allocation quota reached",
+	ErrInsufficientCapacity:         "Insufficient capacity",
+	ErrConnectionAlreadyExists:      "Connection already exists",
+	ErrConnectionTimeoutOrFailure:   "Connection timeout or failure",
 }
 
-// ErrorText returns a reason phrase text for the STUN error code.
-// It returns the empty string if the code is unknown.
-func ErrorText(code int) (r string) {
-	if r = errorText[code]; r == "" {
-		r = stun.ErrorText(code)
-	}
-	return
+type code int
+
+func (c code) Code() int {
+	return int(c)
+}
+
+func (c code) Error() string {
+	return errorText[c]
 }
 
 var be = binary.BigEndian
 
-type errUnsupportedAttrType struct {
-	reflect.Type
-}
+type errAttr attr
 
-func (err errUnsupportedAttrType) Error() string {
-	return "turn: unsupported attribute type: " + reflect.Type(err).String()
-}
-
-type channelCodec struct{}
-
-func (c channelCodec) Encode(w stun.Writer, v interface{}) error {
-	if v, ok := v.(uint16); ok {
-		be.PutUint32(w.Next(4), uint32(v)<<16)
-		return nil
-	}
-	return &errUnsupportedAttrType{Type: reflect.TypeOf(v)}
-}
-
-func (c channelCodec) Decode(r stun.Reader) (interface{}, error) {
-	b, err := r.Next(4)
-	if err != nil {
-		return nil, err
-	}
-	return be.Uint16(b), nil
-}
-
-type uint32Codec struct{}
-
-func (c uint32Codec) Encode(w stun.Writer, v interface{}) error {
-	if v, ok := v.(uint32); ok {
-		be.PutUint32(w.Next(4), v)
-		return nil
-	}
-	return &errUnsupportedAttrType{Type: reflect.TypeOf(v)}
-}
-
-func (c uint32Codec) Decode(r stun.Reader) (interface{}, error) {
-	b, err := r.Next(4)
-	if err != nil {
-		return nil, err
-	}
-	return be.Uint32(b), nil
-}
-
-type evenPortCodec struct{}
-
-func (c evenPortCodec) Encode(w stun.Writer, v interface{}) error {
-	if v, ok := v.(uint8); ok {
-		w.Next(1)[0] = v
-		return nil
-	}
-	return &errUnsupportedAttrType{Type: reflect.TypeOf(v)}
-}
-
-func (c evenPortCodec) Decode(r stun.Reader) (interface{}, error) {
-	b, err := r.Next(1)
-	if err != nil {
-		return nil, err
-	}
-	return b[0], nil
-}
-
-type transportCodec struct{}
-
-func (c transportCodec) Encode(w stun.Writer, v interface{}) error {
-	if v, ok := v.(uint8); ok {
-		be.PutUint32(w.Next(4), uint32(v)<<24)
-		return nil
-	}
-	return &errUnsupportedAttrType{Type: reflect.TypeOf(v)}
-}
-
-func (c transportCodec) Decode(r stun.Reader) (interface{}, error) {
-	b, err := r.Next(4)
-	if err != nil {
-		return nil, err
-	}
-	return b[0], nil
-}
-
-type emptyCodec struct{}
-
-func (c emptyCodec) Encode(w stun.Writer, v interface{}) error {
-	return nil
-}
-
-func (c emptyCodec) Decode(r stun.Reader) (interface{}, error) {
-	return true, nil
+func (e errAttr) Error() string {
+	return "turn: attribute error " + attr.String()
 }

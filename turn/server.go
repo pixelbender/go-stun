@@ -39,3 +39,8 @@ func (srv *Server) ServeSTUN(rw stun.ResponseWriter, r *stun.Message) {
 		srv.Handler.ServeSTUN(rw, r)
 	}
 }
+
+type allocation struct {
+	from *Conn
+	to   net.Conn
+}

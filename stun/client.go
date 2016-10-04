@@ -2,103 +2,84 @@ package stun
 
 import (
 	"bytes"
-	"crypto/rand"
-	"net"
 	"time"
+	"net"
 )
 
-var retransmissionTimeout = 500 * time.Millisecond
-var defaultTimeout = 39500 * time.Millisecond
-
-// Client is a STUN client.
 type Client struct {
-	*Conn
-	Timeout time.Duration
+	Transport     RoundTripper
+	CheckRedirect func(req *Message, addr *Addr) error
 }
 
-func NewClient(c net.Conn, config *Config) *Client {
-	return &Client{
-		Conn:    NewConn(c, config),
-		Timeout: defaultTimeout,
-	}
+type RoundTripper interface {
+	// RoundTrip executes a single STUN transaction, returning a response for the provided request.
+	RoundTrip(*Message) (*Message, error)
 }
 
-// RoundTrip sends STUN request and waits for a STUN response within the transaction.
-// Retransmits on unrelied over transport protocol connection.
-// Tries to authorize
-// No STUN redirect is supported.
-// Returns STUN error responses as errors.
-func (c *Client) RoundTrip(req *Message) (res *Message, err error) {
-	if err = c.WriteMessage(req); err != nil {
-		return
-	}
+// RoundTrip executes a single STUN transaction, returning a response for the provided request.
+func (c *Conn) RoundTrip(req *Message) (res *Message, err error) {
+	req.NewTransaction()
 
-	rto := retransmissionTimeout
-	deadline := time.Now().Add(c.Timeout)
-
-	if !c.reliable {
-		c.SetReadDeadline(time.Now().Add(rto))
-	} else if c.Timeout > 0 {
-		c.SetReadDeadline(deadline)
-	}
+	ts := time.Now()
+	_, retransmit := c.Conn.Conn.(net.PacketConn)
+	rto := c.config.getRetransmissionTimeout()
+	rtx := ts.Add(rto)
+	deadline := ts.Add(c.config.getTransactionTimeout())
 
 	for {
-		res, err = c.ReadMessage()
+		err = c.WriteMessage(req)
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Temporary() && !c.reliable && time.Now().Before(deadline) {
-				// Retransmit
-				if err = c.WriteMessage(req); err != nil {
-					return
-				}
-				rto *= 2
-				c.SetReadDeadline(time.Now().Add(rto))
-				continue
-			}
 			return
 		}
-		if !bytes.Equal(req.Transaction, res.Transaction) {
-			if c.reliable {
-				return nil, ErrFormat
+		ts = time.Now()
+		rtx = ts.Add(rto)
+		select {
+		case b, ok := <-tx.Read():
+			if !ok {
+				return nil, ErrCancelled
 			}
-			continue
-		}
-		if attr, ok := res.Attributes[AttrErrorCode]; ok {
-			code := attr.(*Error)
-			if code.Code == CodeUnauthorized && req.Key == nil {
-				// TODO: store nonce
-				req.Attributes[AttrRealm] = res.Attributes[AttrRealm]
-				req.Attributes[AttrNonce] = res.Attributes[AttrNonce]
-				req.Key, err = c.config.getAuthKey(req.Attributes)
+			if !bytes.Equal(req.Transaction[:], res.Transaction[:]) {
+				continue
+			}
+
+		// check transaction id
+
+			if err == nil {
+				return res
+			}
+
+			err = req.Attributes[AttrErrorCode].(ErrorCode)
+
+			switch err {
+			case ErrUnauthorized, ErrStaleNonce:
+				tx.Attributes[AttrRealm] = res.Attributes[AttrRealm]
+				tx.Attributes[AttrNonce] = res.Attributes[AttrNonce]
+				//tx.Key, err = c.config.getAuthKey(a.Attributes)
+
 				if err != nil {
 					return
 				}
-				if req.Key != nil {
-					// New transaction
-					rand.Read(req.Transaction[4:])
-					c.key = req.Key
-					if err = c.WriteMessage(req); err != nil {
-						return
-					}
-					continue
-				}
 			}
-			// TODO: handle alternate server
+
+		//w.Reset()
+			tx.Reset()
+		case retransmit && <-time.After(rtx.Sub(ts)):
+			rto <<= 1
+
+		case <-time.After(deadline.Sub(ts)):
+			return ErrTimeout
 		}
-		return res, nil
 	}
 }
 
-func GetServerAddress(h string, secure bool) string {
-	host, port, err := net.SplitHostPort(h)
+func (c *Conn) Discover() (net.Addr, error) {
+	msg, err := c.RoundTrip(&Message{Method: methodBinding})
 	if err != nil {
-		host = h
+		return nil, err
 	}
-	if port == "" {
-		if secure {
-			port = "5478"
-		} else {
-			port = "3478"
-		}
+	if addr, ok := msg.Attributes[AttrXorMappedAddress]; ok {
+		return addr.(*Addr), nil
+	} else if addr, ok := msg.Attributes[AttrMappedAddress]; ok {
+		return addr.(*Addr), nil
 	}
-	return net.JoinHostPort(host, port)
 }

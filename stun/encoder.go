@@ -77,8 +77,10 @@ func (enc *Encoder) Encode(m *Message) ([]byte, error) {
 		b := w.Next(24)
 		be.PutUint16(b, AttrMessageIntegrity)
 		be.PutUint16(b[2:], 20)
-		// TODO: sum into byte slice
-		copy(b[4:], integrity(w.buf[:p], m.Key))
+
+		h := hmac.New(sha1.New, m.Key)
+		h.Write(w.buf[:p])
+		h.Sum(b[4:4])
 	}
 	if enc.Fingerprint {
 		be.PutUint16(h[2:], uint16(w.pos-12))
@@ -92,38 +94,15 @@ func (enc *Encoder) Encode(m *Message) ([]byte, error) {
 	return w.buf[:w.pos], nil
 }
 
-// checksum calculates FINGERPRINT attribute value for the STUN message bytes.
+// fingerprint calculates FINGERPRINT attribute value for the STUN message bytes.
 // See RFC 5389 Section 15.5
 func fingerprint(v []byte) uint32 {
 	return crc32.ChecksumIEEE(v) ^ 0x5354554e
 }
 
 // integrity calculates MESSAGE-INTEGRITY attribute value for the STUN message bytes.
-func integrity(v, key []byte) []byte {
+func integrity(v, key, r []byte) []byte {
 	h := hmac.New(sha1.New, key)
 	h.Write(v)
-	return h.Sum(nil)
-}
-
-type Writer interface {
-	// Next returns a slice of the next n bytes.
-	Next(n int) []byte
-}
-
-type writer struct {
-	buf []byte
-	pos int
-}
-
-func (w *writer) Next(n int) (b []byte) {
-	p := w.pos + n
-	if len(w.buf) < p {
-		b := make([]byte, (1+((p-1)>>10))<<10)
-		if w.pos > 0 {
-			copy(b, w.buf[:w.pos])
-		}
-		w.buf = b
-	}
-	b, w.pos = w.buf[w.pos:p], p
-	return
+	return h.Sum(r)
 }

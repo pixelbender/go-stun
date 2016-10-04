@@ -4,12 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/pixelbender/go-stun/mux"
 	"io"
 )
-
-// ErrUnauthorized is returned by Decode or RoundTrip when GetAuthKey is defined
-// but a STUN request does not contain a MESSAGE-INTEGRITY attribute.
-var ErrUnauthorized = errors.New("stun: unauthorized")
 
 // ErrIntegrityCheckFailure is returned by Decode when a STUN message contains
 // a MESSAGE-INTEGRITY attribute and it does not equal to HMAC-SHA1 sum.
@@ -26,9 +23,7 @@ var ErrFormat = errors.New("stun: incorrect format")
 var ErrTruncated = errors.New("stun: truncated")
 
 // ErrUnknownAttrs is returned when a STUN message contains unknown comprehension-required attributes.
-type ErrUnknownAttrs struct {
-	Attributes []uint16
-}
+type ErrUnknownAttrs []uint16
 
 func (e ErrUnknownAttrs) Error() string {
 	return fmt.Sprintf("stun: unknown attributes %#v", e.Attributes)
@@ -36,15 +31,7 @@ func (e ErrUnknownAttrs) Error() string {
 
 // A Decoder reads and decodes STUN messages from a buffer.
 type Decoder struct {
-	*Config
-	key []byte
-}
-
-func NewDecoder(config *Config) *Decoder {
-	if config == nil {
-		config = DefaultConfig
-	}
-	return &Decoder{Config: config}
+	Config *Config
 }
 
 // Decode reads STUN message from the buffer.
@@ -52,11 +39,15 @@ func NewDecoder(config *Config) *Decoder {
 // Checks FINGERPRINT attribute if present.
 // Returns io.EOF if the buffer size is not enough.
 // Returns ErrUnknownAttrs containing unknown comprehension-required STUN attributes.
-func (dec *Decoder) Decode(b []byte, key []byte) (*Message, error) {
-	r := &reader{buf: append([]byte(nil), b...)}
-	h, err := r.Next(20)
-	if err != nil {
-		return nil, err
+
+// func(attrs Attributes) ([]byte, error)
+//
+
+func (dec *Decoder) Decode(r mux.Reader, key []byte) (m *Message, err error) {
+	var b []byte
+
+	if b, err = r.Next(20); err != nil {
+		return
 	}
 	n := int(be.Uint16(h[2:]))
 	d, err := r.Next(n)
@@ -125,31 +116,4 @@ func (dec *Decoder) Decode(b []byte, key []byte) (*Message, error) {
 		return m, &ErrUnknownAttrs{unk}
 	}
 	return m, nil
-}
-
-type Reader interface {
-	// Next returns a slice of the next n bytes.
-	Next(n int) ([]byte, error)
-	// Available returns number of available unread bytes.
-	Available() int
-}
-
-type reader struct {
-	msg []byte
-	buf []byte
-	pos int
-}
-
-func (r *reader) Available() int {
-	return len(r.buf) - r.pos
-}
-
-func (r *reader) Next(n int) ([]byte, error) {
-	p := r.pos + n
-	if len(r.buf) < r.pos+n {
-		return nil, io.EOF
-	}
-	off := r.pos
-	r.pos = p
-	return r.buf[off : off+n], nil
 }
