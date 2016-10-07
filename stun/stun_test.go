@@ -89,7 +89,7 @@ func TestVectorsSampleRequest(t *testing.T) {
 		t.Fatal("decode hex", err)
 	}
 	dec := NewDecoder(nil)
-	msg, err := dec.Decode(b, []byte("VOkJxbRl1RmTxUk/WvJxBt"))
+	msg, err := Decode(b, []byte("VOkJxbRl1RmTxUk/WvJxBt"))
 	if unk, ok := err.(*ErrUnknownAttrs); ok {
 		if len(unk.Attributes) == 1 && unk.Attributes[0] == 0x24 {
 			err = nil

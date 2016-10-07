@@ -12,6 +12,11 @@ type Reader struct {
 	fill    func([]byte) (int, error)
 }
 
+func NewReader(b []byte) *Reader {
+	return &Reader{buf: b}
+}
+
+
 // Peek returns the next n bytes without advancing the reader.
 // The bytes stop being valid at the next read call.
 func (r *Reader) Peek(n int) (b []byte, err error) {
@@ -45,7 +50,7 @@ func (r *Reader) Peek(n int) (b []byte, err error) {
 	return
 }
 
-func (r *Reader) Reader(n int) (s *Reader, err error) {
+func (r *Reader) Payload(n int) (s *Reader, err error) {
 	var b []byte
 	if b, err = r.Next(n); err != nil {
 		return

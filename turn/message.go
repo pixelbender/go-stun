@@ -63,6 +63,16 @@ var attrNames = map[attr]string{
 	attrConnectionId:       "CONNECTION-ID",
 }
 
+func NewAttribute(at uint16) stun.Attr {
+	switch v := attr(at) {
+	case attrChannelNumber, attrLifeTime, attrXorPeerAddress, attrData, attrXorRelayedAddress, attrEvenPort,
+		attrRequestedTransport, attrDontFragment, attrReservationToken, attrConnectionId:
+		return v
+	default:
+		return stun.NewAttribute(at)
+	}
+}
+
 type attr uint16
 
 func (at attr) Decode(m *stun.Message, r mux.Reader) (v interface{}, err error) {
@@ -129,23 +139,23 @@ func (at attr) String() string {
 	return fmt.Sprintf("0x%4x", at)
 }
 
-type message stun.Message
+var be = binary.BigEndian
 
 const (
 	// STUN errors introduced by the RFC 5766 Section 15.
-	ErrForbidden                    code = 403
-	ErrAllocationMismatch           code = 437
-	ErrWrongCredentials             code = 441
-	ErrUnsupportedTransportProtocol code = 442
-	ErrAllocationQuotaReached       code = 486
-	ErrInsufficientCapacity         code = 508
+	ErrForbidden                    errCode = 403
+	ErrAllocationMismatch           errCode = 437
+	ErrWrongCredentials             errCode = 441
+	ErrUnsupportedTransportProtocol errCode = 442
+	ErrAllocationQuotaReached       errCode = 486
+	ErrInsufficientCapacity         errCode = 508
 
 	// STUN errors introduced by the RFC 6062 Section 6.3.
-	ErrConnectionAlreadyExists    code = 446
-	ErrConnectionTimeoutOrFailure code = 447
+	ErrConnectionAlreadyExists    errCode = 446
+	ErrConnectionTimeoutOrFailure errCode = 447
 )
 
-var errorText = map[code]string{
+var errorText = map[errCode]string{
 	ErrForbidden:                    "Forbidden",
 	ErrAllocationMismatch:           "Allocation mismatch",
 	ErrWrongCredentials:             "Wrong credentials",
@@ -156,20 +166,21 @@ var errorText = map[code]string{
 	ErrConnectionTimeoutOrFailure:   "Connection timeout or failure",
 }
 
-type code int
+type errCode int
 
-func (c code) Code() int {
+func (c errCode) Code() int {
 	return int(c)
 }
 
-func (c code) Error() string {
+func (c errCode) Error() string {
 	return errorText[c]
 }
 
-var be = binary.BigEndian
-
-type errAttr attr
-
-func (e errAttr) Error() string {
-	return "turn: attribute error " + attr.String()
+func init() {
+	for it := range attrNames {
+		stun.RegisterAttribute(it)
+	}
+	for it := range attrNames {
+		stun.RegisterErrorCode(it)
+	}
 }

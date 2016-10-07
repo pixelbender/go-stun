@@ -15,11 +15,17 @@ var errBadResponse = errors.New("turn: bad response")
 var defaultLifetime = 10 * time.Minute
 
 type Config struct {
-	stun.Config
+	// GetAuthKey returns a key for a MESSAGE-INTEGRITY attribute generation and validation.
+	// See stun.Config for details.
+	GetAuthKey func(m *stun.Message) ([]byte, error)
+	// Software is a value for SOFTWARE attribute.
+	Software string
 }
 
 type Conn struct {
-	conn *stun.Conn
+	stun.Conn
+
+	config *Config
 	transport uint8
 
 	mu        sync.RWMutex
@@ -30,39 +36,22 @@ type Conn struct {
 	seq       int32
 }
 
-func NewConn(inner net.Conn, config *Config) (c *Conn, err error) {
-	c = &Conn{
-		Conn: stun.NewConn(inner, config),
-		transport: transportUDP,
-	}
-	c.Reader(c.decode)
-	c.Handle(c.probe, c.Receive)
-	err = c.allocate(defaultLifetime)
-	return
+// NewConn creates a TURN connection over the net.Conn with specified configuration.
+// It starts reading goroutine
+func NewConn(inner net.Conn, config *Config) *Conn {
+	m := mux.NewConn(inner)
+	c := NewConnMux(m, config)
+	go m.Serve()
+	return c
 }
 
-func (c *Conn) decode(r mux.Reader) error {
-
-	return c.addr
+func NewConnMux(m mux.Conn, config *Config) *Conn {
+	c := &Conn{Conn: m, config: config}
+	m.Handle(c.ServeMux)
+	return c
 }
 
-func (c *Conn) RelayedAddr() net.Addr {
-	return c.addr
-}
-
-func (c *Conn) roundTrip(method uint8, attrs stun.Attributes) (*Message, error) {
-	c.conn.RoundTrip(&stun.Message{
-		Method: MethodAllocate,
-		Attributes: stun.Attributes{
-			AttrRequestedTransport: c.transport,
-			AttrLifeTime: ttl,
-			AttrDontFragment: true,
-		},
-	}
-})
-}
-
-func (c *Conn) allocate(ttl time.Duration) error {
+func (c *Conn) Allocate(network string) (Allocation, error) {
 	msg, err := c.RoundTrip(methodAllocate, stun.Attributes{
 		attrRequestedTransport: c.transport,
 		attrLifeTime: ttl,
@@ -84,24 +73,6 @@ func (c *Conn) allocate(ttl time.Duration) error {
 	return nil
 }
 
-func (c *Conn) refresh() error {
-	msg, err := c.roundTrip(methodRefresh, nil)
-	if err != nil {
-		return err
-	}
-	if v, ok := msg.Attributes[AttrLifeTime]; ok {
-		c.deadline = time.Now().Add(v.(time.Duration) - time.Minute)
-	} else {
-		return errBadResponse
-	}
-	return nil
-}
-
-func (c *Conn) CreatePermission(addr net.Addr) (err error) {
-	_, err = c.roundTrip(methodCreatePermission, stun.Attributes{
-		AttrXorPeerAddress: addr,
-	},
-}
 
 func (c *Conn) Dial(addr net.Addr) (ch *Channel, err error) {
 	id := uint16(atomic.AddInt32(&c.seq, 1) + 0x4000)
@@ -125,6 +96,67 @@ func (c *Conn) Dial(addr net.Addr) (ch *Channel, err error) {
 	return
 }
 
+
+/*
+	stun.NewConn(c, config.Config)
+
+	m := mux.NewConn(inner, nil)
+	m.Handle(m.ServeMux)
+	stun.NewConnMux()
+
+	c = &Conn{
+		Conn: stun.NewConn(inner, config),
+		transport: transportUDP,
+	}
+	c.Reader(c.decode)
+	c.Handle(c.probe, c.Receive)
+	err = c.allocate(defaultLifetime)
+	return
+*/
+
+func (c *Conn) decode(r mux.Reader) error {
+
+	return c.addr
+}
+
+func (c *Conn) RelayedAddr() net.Addr {
+	return c.addr
+}
+
+/*
+func (c *Conn) roundTrip(method uint8, attrs stun.Attributes) (*Message, error) {
+	c.conn.RoundTrip(&stun.Message{
+		Method: MethodAllocate,
+		Attributes: stun.Attributes{
+			AttrRequestedTransport: c.transport,
+			AttrLifeTime: ttl,
+			AttrDontFragment: true,
+		},
+	}
+})
+}*/
+
+
+
+func (c *Conn) refresh() error {
+	msg, err := c.roundTrip(methodRefresh, nil)
+	if err != nil {
+		return err
+	}
+	if v, ok := msg.Attributes[AttrLifeTime]; ok {
+		c.deadline = time.Now().Add(v.(time.Duration) - time.Minute)
+	} else {
+		return errBadResponse
+	}
+	return nil
+}
+
+func (c *Conn) CreatePermission(addr net.Addr) (err error) {
+	_, err = c.roundTrip(methodCreatePermission, stun.Attributes{
+		AttrXorPeerAddress: addr,
+	},
+}
+
 func (c *Conn) sendChannelData(id uint16, p mux.Packet) (int, error) {
 	w := c.NewPacket()
 	b := w.Next(4)
@@ -146,6 +178,10 @@ func (p *dataPacket) Decode(w mux.Writer) error {
 	p.packet.Encode(w)
 	be.PutUint16(b, p.id)
 	be.PutUint16(b[2:], uint16(w.Len() - l))
+}
+
+type Allocation struct {
+
 }
 
 type Channel struct {

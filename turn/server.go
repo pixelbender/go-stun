@@ -1,13 +1,14 @@
 package turn
 
 import (
+	"github.com/pixelbender/go-stun/mux"
 	"github.com/pixelbender/go-stun/stun"
 	"net"
 	"time"
 )
 
 type Server struct {
-	*stun.Server
+	mux.Mux
 	LifeTime time.Duration
 }
 
@@ -15,12 +16,7 @@ func NewServer() *Server {
 	srv := &Server{
 		LifeTime: time.Second,
 	}
-	srv.Server = &stun.Server{
-		Config: &stun.Config{
-			GetAttributeCodec: GetAttributeCodec,
-		},
-		Handler: srv,
-	}
+	srv.Handle(srv.ServeMux)
 	return srv
 }
 

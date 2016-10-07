@@ -1,5 +1,5 @@
 package stun
-
+// +build ignore
 import (
 	"crypto/rand"
 	"crypto/tls"

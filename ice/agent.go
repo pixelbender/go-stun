@@ -2,14 +2,14 @@ package ice
 
 import (
 	"errors"
+	"github.com/pixelbender/go-sdp/sdp"
+	"github.com/pixelbender/go-stun/mux"
 	"log"
 	"math/rand"
 	"net"
 	"strconv"
 	"sync"
 	"time"
-	"github.com/pixelbender/go-stun/mux"
-	"github.com/pixelbender/go-sdp/sdp"
 )
 
 type Config struct {

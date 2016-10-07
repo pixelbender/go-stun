@@ -1,16 +1,16 @@
 package stun
-
+// +build ignore
 import (
 	"crypto/md5"
 	"crypto/tls"
 	"errors"
+	"github.com/pixelbender/go-stun/mux"
+	"github.com/prometheus/common/config"
 	"net"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
-	"github.com/prometheus/common/config"
-	"github.com/pixelbender/go-stun/mux"
 )
 
 // Dial connects to the given STUN URI.
@@ -32,7 +32,7 @@ func Dial(uri, username, password string) (*Conn, error) {
 		return nil, err
 	}
 	config := &Config{
-		GetAuthKey:LongTermAuthKey(username, password),
+		GetAuthKey: LongTermAuthKey(username, password),
 	}
 	return NewConn(conn, config), nil
 }
@@ -70,48 +70,6 @@ func LongTermAuthKey(username, password string) func(attrs Attributes) ([]byte, 
 		}
 		return nil, nil
 	}
-}
-
-// Config represents a STUN connection configuration.
-type Config struct {
-	// GetAuthKey returns a key for a MESSAGE-INTEGRITY attribute generation and validation.
-	// Key = MD5(username ":" realm ":" SASLprep(password)) for long-term credentials.
-	// Key = SASLprep(password) for short-term credentials.
-	// SASLprep is defined in RFC 4013.
-	// The Username and Password fields are ignored if GetAuthKey is defined.
-	GetAuthKey            func(m *Message) ([]byte, error)
-
-	// GetAttributeCodec returns STUN attribute codec for the specified attribute type.
-	// Using stun.GetAttributeCodec if GetAttributeCodec is nil.
-	GetAttribute          func(at uint16) Attr
-
-	GetError              func(code int) ErrorCode
-
-	// Retransmission timeout, default is 500ms
-	RetransmissionTimeout time.Duration
-
-	// Transaction timeout, default is 39.5 seconds
-	TransactionTimeout    time.Duration
-
-	// Fingerprint controls whether a FINGERPRINT attribute will be generated.
-	Fingerprint           bool
-
-	// Software is a value for SOFTWARE attribute.
-	Software              string
-}
-
-func (c *Config) getRetransmissionTimeout() time.Duration {
-	if c != nil && c.RetransmissionTimeout > 0 {
-		return c.RetransmissionTimeout
-	}
-	return 500 * time.Millisecond
-}
-
-func (c *Config) getTransactionTimeout() time.Duration {
-	if c != nil && c.TransactionTimeout > 0 {
-		return c.TransactionTimeout
-	}
-	return 39500 * time.Millisecond
 }
 
 var errUnsupportedScheme = errors.New("stun: unsupported scheme")

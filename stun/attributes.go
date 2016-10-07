@@ -63,15 +63,12 @@ var attrNames = map[attr]string{
 	AttrReflectedFrom:     "REFLECTED-FROM",
 }
 
-var attrRegistry = map[uint16]attr {
+func RegisterAttribute(at Attr) Attr {
+	return attr(at)
 }
 
-func RegisterAttribute(at Attr) {
-	attrRegistry[at.Type()] = at
-}
+func getAttribute(typ uint16) (at Attr, known bool) {
 
-func GetAttribute(at uint16) Attr {
-	return attrRegistry[at]
 }
 
 type attr uint16
@@ -83,7 +80,8 @@ func (at attr) Type() uint16 {
 func (at attr) Decode(m *Message, r mux.Reader) (v interface{}, err error) {
 	var b []byte
 	switch at {
-	case AttrMappedAddress, AttrXorMappedAddress, AttrAlternateServer, AttrResponseOrigin, AttrOtherAddress, AttrResponseAddress, AttrSourceAddress, AttrChangedAddress, AttrReflectedFrom:
+	case AttrMappedAddress, AttrXorMappedAddress, AttrAlternateServer, AttrResponseOrigin,
+		AttrOtherAddress, AttrResponseAddress, AttrSourceAddress, AttrChangedAddress, AttrReflectedFrom:
 		if b, err = r.Next(4); err != nil {
 			return
 		}
@@ -134,7 +132,8 @@ func (at attr) Encode(m *Message, v interface{}, w mux.Writer) error {
 		copy(w.Next(len(raw)), raw)
 	}
 	switch at {
-	case AttrMappedAddress, AttrXorMappedAddress, AttrAlternateServer, AttrResponseOrigin, AttrOtherAddress, AttrResponseAddress, AttrSourceAddress, AttrChangedAddress, AttrReflectedFrom:
+	case AttrMappedAddress, AttrXorMappedAddress, AttrAlternateServer, AttrResponseOrigin,
+		AttrOtherAddress, AttrResponseAddress, AttrSourceAddress, AttrChangedAddress, AttrReflectedFrom:
 		if addr, ok := v.(*Addr); ok {
 			fam, sh := byte(0x01), addr.IP.To4()
 			if len(sh) == 0 {
@@ -190,13 +189,9 @@ func (at attr) String() string {
 }
 
 // ErrorCode represents the ERROR-CODE attribute.
-type ErrorCode struct {
-	Code   int
-	Reason string
-}
-
-func (c *ErrorCode) String() string {
-	return c.Reason
+type ErrorCode interface {
+	Code() int
+	Error() string
 }
 
 // Addr represents a transport address attribute.
@@ -242,7 +237,9 @@ var errorText = map[code]string{
 	ErrGlobalFailure:         "Global failure",
 }
 
-
+func NewError(c int) ErrorCode {
+	return code(c)
+}
 
 type code int
 
@@ -255,10 +252,3 @@ func (c code) Error() string {
 }
 
 var be = binary.BigEndian
-
-
-func init() {
-	for at := range attrNames {
-		RegisterAttribute(at)
-	}
-}

@@ -9,61 +9,58 @@ import (
 	"net"
 	"sync"
 	"time"
+	"context"
 )
-
-var bufferSize = 2048 // TODO: buffer pool
 
 // ErrFormat is returned by a handler if a message format is not supported.
 var ErrFormat = errors.New("format error")
 
-// A Conn is a multiplexed half-connection.
-// Use muxer to handle incoming messages.
-type Conn interface {
+// A Transport is a network transport, it provides send operation.
+type Transport interface {
+	Network() string
 	Send(enc func(*Writer) error) error
 	LocalAddr() net.Addr
 	RemoteAddr() net.Addr
 	Close() error
 }
 
+type BufferPool interface {
+	Put(x interface{})
+	Get() interface{}
+}
+
+var bufferPool = &sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 2048)
+	},
+}
+
 // A Mux is a multiprotocol connection multiplexer.
 type Mux struct {
-	// An idle timeout for connections.
-	// If zero, then the default value which is 1 minute.
-	Timeout time.Duration
+	mu sync.RWMutex
+	chain []func(Transport, *Reader) error
+}
 
-	// A buffer size for reading from connection.
-	// If zero, then the default value which is 2048 bytes.
-	BufferSize int
+func (m *Mux) Match(ctx context.Context, match func(b []byte) int) (Reader, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+}
 
-	BufferPool sync.Pool
-
-	mu    sync.RWMutex
-	chain []func(Conn, *Reader) error
+func (m *Mux) Handle(r io.Reader) error {
+	m.mu.
 }
 
 // Handle appends h to the decoder chain of the muxer.
 // When data becomes available on connection, muxer calls handlers sequentially.
 // The handler h must return ErrFormat if message format is not supported
 // or io.EOF if r does not contain required bytes to determine a message format.
-// Connection will be closed if there are no handlers, all handlers return ErrFormat or another error, except io.EOF.
-func (m *Mux) Handle(h func(Conn, *Reader) error) {
+// Connection will be closed if there are no handlers,
+// all handlers return ErrFormat or another error, except io.EOF.
+func (m *Mux) Handle(h func(Transport, *Reader) error) {
 	m.mu.Lock()
 	m.chain = append(m.chain, h)
 	m.mu.Unlock()
-}
-
-// NewConn creates a multiplexed connection over net.Conn interface.
-// It starts goroutine, reads c and calls muxer when data becomes available.
-// It closes c after the specified Timeout of inactivity.
-func (m *Mux) NewConn(inner net.Conn) Conn {
-	if _, ok := inner.(net.PacketConn); ok {
-		c := &packetConn{Conn: inner, mux: m}
-		go c.serve()
-		return c
-	}
-	c := &streamConn{Conn: inner, mux: m}
-	go c.serve()
-	return c
 }
 
 // ServeConn reads c and calls handlers from decoder chain when data becomes available.
@@ -72,10 +69,10 @@ func (m *Mux) NewConn(inner net.Conn) Conn {
 func (m *Mux) ServeConn(c net.Conn) error {
 	if _, ok := c.(net.PacketConn); ok {
 		conn := &packetConn{Conn: c, mux: m}
-		return conn.serve()
+		return conn.Serve()
 	}
 	conn := &streamConn{Conn: c, mux: m}
-	return conn.serve()
+	return conn.Serve()
 }
 
 // ServePacket receives incoming packets over the packet-oriented network listener
@@ -83,7 +80,11 @@ func (m *Mux) ServeConn(c net.Conn) error {
 // ServePacket always returns a non-nil error.
 func (m *Mux) ServePacket(c net.PacketConn) error {
 	defer c.Close()
-	buf := make([]byte, bufferSize)
+
+	pool := m.getBufferPool()
+	buf := pool.Get().([]byte)
+	defer pool.Put(buf)
+
 	r := &Reader{}
 	for {
 		n, addr, err := c.ReadFrom(buf)
@@ -173,23 +174,36 @@ func (m *Mux) DialAndServeTLS(network, addr string, config *tls.Config) error {
 	return m.ServeConn(c)
 }
 
-func (m *Mux) handle(c Conn, r *Reader) error {
+func (m *Mux) handle(c Transport, r *Reader) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	f := 0
 	for _, h := range m.chain {
-		if r.Buffered() > 0 {
-			if err := h(c, r); err != nil && err != io.EOF {
-				return err
-			}
-		} else {
+		if r.Buffered() <= 0 {
 			break
 		}
+		err := h(c, r)
+		if err != nil && err != io.EOF {
+			if err == ErrFormat {
+				f++
+			} else {
+				return err
+			}
+		}
+	}
+	if f == len(m.chain) {
+		return ErrFormat
 	}
 	return nil
 }
 
 func (m *Mux) send(conn io.Writer, enc func(*Writer) error) (err error) {
-	w := &Writer{}
+	pool := m.getBufferPool()
+	buf := pool.Get().([]byte)
+	defer pool.Put(buf)
+
+	w := &Writer{buf: buf}
 	err = enc(w)
 	if err != nil {
 		return
@@ -204,13 +218,24 @@ func (m *Mux) setDeadline(conn net.Conn) error {
 	if m.Timeout > 0 {
 		return conn.SetDeadline(time.Now().Add(m.Timeout))
 	}
-	return conn.SetDeadline(time.Now().Add(time.Minute))
+	return nil
+}
+
+func (m *Mux) getBufferPool() BufferPool {
+	if m.BufferPool != nil {
+		return m.BufferPool
+	}
+	return bufferPool
 }
 
 type packetServer struct {
 	net.PacketConn
 	mux  *Mux
 	addr *net.UDPAddr
+}
+
+func (packetServer) Network() string {
+	return "udp"
 }
 
 func (c *packetServer) Write(p []byte) (int, error) {
@@ -227,86 +252,6 @@ func (c *packetServer) RemoteAddr() net.Addr {
 
 func (packetServer) Close() error {
 	return nil
-}
-
-type packetConn struct {
-	net.Conn
-	mux   *Mux
-	chain []func(r Reader) error
-}
-
-func (c *packetConn) serve() error {
-	defer c.Close()
-	buf := make([]byte, bufferSize)
-	r := &Reader{}
-	for {
-		c.mux.setDeadline(c.Conn)
-		n, err := c.Read(buf)
-		if err != nil {
-			return err
-		}
-		if n > 0 {
-			r.buf, r.pos = buf[:n], 0
-			if err = c.mux.handle(c, r); err != nil {
-				return err
-			}
-		}
-	}
-}
-
-func (c *packetConn) Write(p []byte) (int, error) {
-	c.mux.setDeadline(c.Conn)
-	return c.Conn.Write(p)
-}
-
-func (c *packetConn) Send(enc func(*Writer) error) error {
-	return c.mux.send(c.Conn, enc)
-}
-
-type streamConn struct {
-	net.Conn
-	mux *Mux
-}
-
-func (c *streamConn) Mux() *Mux {
-	return c.mux
-}
-
-func (c *streamConn) Network() string {
-	return "tcp"
-}
-
-func (c *streamConn) serve() error {
-	defer c.Close()
-	buf := make([]byte, bufferSize)
-	r := &Reader{buf: buf[:0], fill: c.Read}
-	for {
-		c.mux.setDeadline(c.Conn)
-		_, err := r.Peek(r.Buffered() + 1)
-		if err != nil {
-			return err
-		}
-		n := r.counter
-		for r.Buffered() > 0 {
-			if err = c.mux.handle(c, r); err != nil {
-				return err
-			}
-			if n == r.counter {
-				break
-			} else {
-				n = r.counter
-			}
-		}
-	}
-}
-
-func (c *streamConn) Write(p []byte) (int, error) {
-	c.mux.setDeadline(c.Conn)
-	return c.Conn.Write(p)
-}
-
-func (c *streamConn) Send(enc func(*Writer) error) error {
-	return c.mux.send(c.Conn, enc)
 }
 
 type errUnsupportedNetwork string
