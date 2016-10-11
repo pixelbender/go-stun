@@ -2,9 +2,7 @@ package ice
 
 import (
 	"errors"
-	"github.com/pixelbender/go-sdp/sdp"
 	"github.com/pixelbender/go-stun/mux"
-	"log"
 	"math/rand"
 	"net"
 	"strconv"
@@ -28,42 +26,32 @@ type Config struct {
 }
 
 func (config *Config) getPriority(cand *Candidate) (v uint32) {
-	if config != nil && config.GetPriority != nil {
+	if config.GetPriority != nil {
 		return config.GetPriority(cand)
 	}
-	switch cand.Type {
-	case TypeHost:
-		v += 126 << 24
-	case TypePeerReflexive:
-		v += 110 << 24
-	case TypeServerReflexive:
-		v += 100 << 24
-	}
-	v += uint32(len(cand.Address.IP)<<8 + 256 - cand.Component)
+	v = cand.getTypePriority() << 24
+	v += (cand.getDirectionPreference()<<13 + uint32(cand.Index)) << 8
+	v += uint32(256 - cand.Component)
 	return
 }
 
 // Agent represents an ICE agent.
 type Agent struct {
-	*mux.Mux
+	m mux.Mux
 
 	config *Config
-	mu     sync.RWMutex
 
 	Component int
 	Username  string
 	Password  string
 
+	mu     sync.RWMutex
 	local  []*Candidate
 	remote []*Candidate
 }
 
-func NewAgent() *Agent {
-
-}
-
-func (a *Agent) AddRemoteCandidate(c *Candidate) error {
-	return nil
+func NewAgent(config *Config) *Agent {
+	return &Agent{config: config}
 }
 
 //func (a *Agent) Gather(config *Config) (error) {
@@ -133,30 +121,34 @@ func (a *Agent) Listen(networks ...string) ([]*Candidate, error) {
 }
 
 func (a *Agent) ListenUDP(network string, addr *net.UDPAddr) (*Candidate, error) {
-	conn, err := net.ListenUDP(network, addr)
+	c, err := net.ListenUDP(network, addr)
 	if err != nil {
 		return nil, err
 	}
 	cand := &Candidate{
 		Transport: TransportUDP,
-		Address:   NewAddr(conn.LocalAddr()),
+		Address:   NewAddr(c.LocalAddr()),
 		Type:      TypeHost,
+		conn:      c,
 	}
-	a.addLocalCandidate(cand, &packetConnCandidate{conn: conn})
+	a.AddLocalCandidate(cand)
+	go a.m.ServeConn(c)
 	return cand, nil
 }
 
 func (a *Agent) ListenTCP(network string, addr *net.TCPAddr) (*Candidate, error) {
-	conn, err := net.ListenTCP(network, addr)
+	l, err := net.ListenTCP(network, addr)
 	if err != nil {
 		return nil, err
 	}
 	cand := &Candidate{
 		Transport: TransportTCP,
-		Address:   NewAddr(conn.Addr()),
+		Address:   NewAddr(l.Addr()),
 		Type:      TypeHost,
+		conn:      l,
 	}
-	a.addLocalCandidate(cand, &listenerCandidate{conn: conn})
+	a.AddLocalCandidate(cand)
+	go a.m.Serve(l)
 	return cand, nil
 }
 
@@ -194,11 +186,12 @@ func (a *Agent) Allocate(uri, username, password string) (*Candidate, error) {
 }
 */
 
-func (a *Agent) addLocalCandidate(cand *Candidate, conn Conn) error {
+func (a *Agent) AddLocalCandidate(cand *Candidate) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
 	for _, it := range a.local {
-		if sameFoundation(it, cand) {
+		if haveSameFoundation(it, cand) {
 			cand.Foundation = it.Foundation
 			break
 		}
@@ -206,10 +199,14 @@ func (a *Agent) addLocalCandidate(cand *Candidate, conn Conn) error {
 	if cand.Foundation == "" {
 		cand.Foundation = strconv.Itoa(len(a.local))
 	}
+	cand.Index = len(a.local)
 	cand.Component = a.Component
 	cand.Priority = a.config.getPriority(cand)
 	a.local = append(a.local, cand)
-	log.Printf("ADD %v", cand.Attribute())
+}
+
+func (a *Agent) AddRemoteCandidate(c *Candidate) {
+
 	return nil
 }
 

@@ -39,13 +39,13 @@ type Conn struct {
 // NewConn creates a TURN connection over the net.Conn with specified configuration.
 // It starts reading goroutine
 func NewConn(inner net.Conn, config *Config) *Conn {
-	m := mux.NewConn(inner)
+	m := mux.NewTransport(inner)
 	c := NewConnMux(m, config)
 	go m.Serve()
 	return c
 }
 
-func NewConnMux(m mux.Conn, config *Config) *Conn {
+func NewConnMux(m mux.Transport, config *Config) *Conn {
 	c := &Conn{Conn: m, config: config}
 	m.Handle(c.ServeMux)
 	return c
@@ -187,23 +187,32 @@ type Allocation struct {
 type Channel struct {
 	conn *Conn
 	id    uint16
-	input chan []byte
-	dec []func(r mux.Reader) error
+	input chan mux.Packet
+	//dec []func(r mux.Reader) error
 }
 
 func newChannel(conn mux.Mux, id uint16) *Channel {
 }
 
+func (ch *Channel) NewPacket() (mux.Packet, error) {
+	return newPacket(conn.NewPacket(), ch.id)
+}
+
 func (ch *Channel) Write(p []byte) (int, error) {
+	p := ch.NewPacket()
+	p.Write(p)
+	return p.Send()
 	make([]byte, 4 + len(b))
 
 	return len(p), ch.WritePacket(rawBytes(p).marshal)
 }
 
 func (ch *Channel) Read(p []byte) (n int, err error) {
+	conn.Read(matc)
 }
 
 func (c *Channel) Close() {
+
 	// todo: remove from parent conn
 }
 
@@ -213,6 +222,23 @@ func (m muxer) Upstream(r mux.Reader) error {
 	for _, it := range m {
 
 	}
+}
+
+type packet struct {
+	mux.Packet
+	h mux.Header
+}
+
+func newPacket(p mux.Packet, id uint16) packet {
+	h := p.Header(4)
+	be.PutUint16(h, id)
+	&packet{p, h}
+}
+
+func (p *packet) Send() error {
+	be.PutUint16(p.h.Bytes()[2:], uint16(p.h.Payload()))
+	v, err = p.Packet.Send()
+
 }
 
 type marshaler struct {

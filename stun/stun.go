@@ -1,16 +1,11 @@
 package stun
-// +build ignore
+
 import (
-	"crypto/md5"
 	"crypto/tls"
 	"errors"
-	"github.com/pixelbender/go-stun/mux"
-	"github.com/prometheus/common/config"
 	"net"
 	"net/url"
 	"strings"
-	"sync"
-	"time"
 )
 
 // Dial connects to the given STUN URI.
@@ -22,9 +17,9 @@ func Dial(uri, username, password string) (*Conn, error) {
 	var conn net.Conn
 	switch strings.ToLower(u.Scheme) {
 	case "stun":
-		conn, err = net.Dial("udp", errUnsupportedScheme(u.Opaque, false))
+		conn, err = net.Dial("udp", getServerAddress(u.Opaque, false))
 	case "stuns":
-		conn, err = tls.Dial("tcp", errUnsupportedScheme(u.Opaque, true), nil)
+		conn, err = tls.Dial("tcp", getServerAddress(u.Opaque, true), nil)
 	default:
 		err = errUnsupportedScheme
 	}
@@ -32,7 +27,7 @@ func Dial(uri, username, password string) (*Conn, error) {
 		return nil, err
 	}
 	config := &Config{
-		GetAuthKey: LongTermAuthKey(username, password),
+	//GetAuthKey: LongTermAuthKey(username, password),
 	}
 	return NewConn(conn, config), nil
 }
@@ -48,6 +43,8 @@ func Discover(uri, username, password string) (net.Addr, error) {
 	return c.Discover()
 }
 
+/*
+
 // ListenAndServe listens on the network address and calls handler to serve requests.
 func ListenAndServe(network, addr string, handler Handler) error {
 	srv := &Server{Config: DefaultConfig, Handler: handler}
@@ -59,7 +56,9 @@ func ListenAndServeTLS(network, addr string, certFile, keyFile string, handler H
 	srv := &Server{Config: DefaultConfig, Handler: handler}
 	return srv.ListenAndServeTLS(network, addr, certFile, keyFile)
 }
+*/
 
+/*
 func LongTermAuthKey(username, password string) func(attrs Attributes) ([]byte, error) {
 	return func(attrs Attributes) ([]byte, error) {
 		if attrs.Has(AttrRealm) {
@@ -70,7 +69,7 @@ func LongTermAuthKey(username, password string) func(attrs Attributes) ([]byte, 
 		}
 		return nil, nil
 	}
-}
+}*/
 
 var errUnsupportedScheme = errors.New("stun: unsupported scheme")
 

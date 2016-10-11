@@ -2,6 +2,7 @@ package ice
 
 import (
 	"github.com/pixelbender/go-sdp/sdp"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -11,12 +12,18 @@ const (
 	TypeHost            = "host"
 	TypeServerReflexive = "srflx"
 	TypePeerReflexive   = "prflx"
-	TypeRelay           = "relay"
+	TypeRelayed         = "relay"
 )
 
 const (
 	TransportUDP = "UDP"
 	TransportTCP = "TCP"
+)
+
+const (
+	TCPTypeActive  = "active"
+	TCPTypePassive = "passive"
+	TCPTypeSO      = "so"
 )
 
 type Addr struct {
@@ -35,7 +42,16 @@ func NewAddr(v net.Addr) *Addr {
 	}
 }
 
+//host udp tcp-active tcp-passive tcp-so
+//prflx
+//srflx
+//relay
+
 type Candidate struct {
+	Conn    io.Closer
+	Network string
+	Index   int
+
 	Foundation  string
 	Component   int
 	Transport   string
@@ -44,6 +60,8 @@ type Candidate struct {
 	Type        string
 	BaseAddress *Addr
 	Params      map[string]string
+
+	TCPType string
 }
 
 // ParseCandidate parses an SDP "candidate" attribute value into struct.
@@ -133,6 +151,53 @@ func (c *Candidate) Attribute() *sdp.Attribute {
 	return &sdp.Attribute{Name: "candidate", Value: string(w.bytes())}
 }
 
+func (c *Candidate) isNATAssisted() bool {
+	return false
+}
+
+func (c *Candidate) getTypePriority() (v uint32) {
+	switch c.Type {
+	case TypeHost:
+		v = 126
+	case TypePeerReflexive:
+		v = 110
+	case TypeServerReflexive:
+		if c.isNATAssisted() {
+			v = 105
+		} else {
+			v = 100
+		}
+	}
+	return
+}
+
+func (c *Candidate) getDirectionPreference() (v uint32) {
+	if c.Transport == TransportTCP {
+		if c.Type == TypeServerReflexive {
+			switch c.TCPType {
+			case TCPTypeActive:
+				v = 4
+			case TCPTypePassive:
+				v = 2
+			case TCPTypeSO:
+				v = 6
+			}
+		} else {
+			switch c.TCPType {
+			case TCPTypeActive:
+				v = 6
+			case TCPTypePassive:
+				v = 4
+			case TCPTypeSO:
+				v = 2
+			}
+		}
+	} else {
+		v = 1
+	}
+	return
+}
+
 type parseError struct {
 	typ string
 	val string
@@ -192,16 +257,16 @@ func (w *writer) bytes() []byte {
 	return w.buf[:w.pos]
 }
 
-func sameFoundation(a, b *Candidate) bool {
+func haveSameFoundation(a, b *Candidate) bool {
 	if a == b {
 		return true
 	} else if a == nil || b == nil {
 		return false
 	}
-	return a.Type == b.Type && a.Transport == b.Transport && sameIP(a.Address, b.Address) && sameIP(a.BaseAddress, b.BaseAddress)
+	return a.Type == b.Type && a.Transport == b.Transport && haveSameIP(a.Address, b.Address) && haveSameIP(a.BaseAddress, b.BaseAddress)
 }
 
-func sameIP(a, b *Addr) bool {
+func haveSameIP(a, b *Addr) bool {
 	if a == b {
 		return true
 	} else if a == nil || b == nil {

@@ -1,5 +1,61 @@
 package stun
-// +build ignore
+
+/*
+type Protocol struct {
+}
+
+func NewProtocol() {
+}
+
+type Server struct {
+	mux.Agent
+	config *Config
+}
+
+func NewServer(config *Config) *Server {
+	if config == nil {
+		config = &Config{}
+	}
+	srv := &Server{config:config}
+	srv.Receive(srv.serve)
+	return srv
+}
+
+func (srv *Server) serve(c mux.Conn, r mux.Reader) error {
+	b := r.Bytes()
+	if len(b) < 20 {
+		return io.EOF
+	}
+	p := &Packet{}
+	err := p.Decode(r)
+	if err != nil {
+		return err
+	}
+
+	t.mu.RLock()
+	ch := t.reqs[string(b[4:20])]
+	t.mu.RUnlock()
+	if ch == nil {
+		// Skip unknown transaction
+		n := int(be.Uint16(b[2:]))
+		r.Next(n)
+		return nil
+	}
+	p := &Packet{}
+	p.Key = t.key
+	err := p.Decode(r)
+	if err != nil {
+		return err
+	}
+	select {
+	case ch <- p:
+	default:
+	}
+	return nil
+}
+*/
+
+/*
 import (
 	"crypto/rand"
 	"crypto/tls"
@@ -182,46 +238,4 @@ func (srv *Server) ServeSTUN(rw ResponseWriter, r *Message) {
 		})
 	}
 }
-
-type connResponseWriter struct {
-	*Conn
-	msg *Message
-}
-
-func (w *connResponseWriter) WriteMessage(msg *Message) error {
-	if msg.Transaction == nil {
-		msg.Transaction = w.msg.Transaction
-	}
-	if msg.Key == nil {
-		msg.Key = w.msg.Key
-	}
-	return w.Conn.WriteMessage(msg)
-}
-
-type packetResponseWriter struct {
-	net.PacketConn
-	msg  *Message
-	addr net.Addr
-	enc  *Encoder
-}
-
-func (w *packetResponseWriter) RemoteAddr() net.Addr {
-	return w.addr
-}
-
-func (w *packetResponseWriter) WriteMessage(msg *Message) error {
-	if msg.Transaction == nil {
-		msg.Transaction = w.msg.Transaction
-	}
-	if msg.Key == nil {
-		msg.Key = w.msg.Key
-	}
-	b, err := w.enc.Encode(msg)
-	if err != nil {
-		return err
-	}
-	if _, err = w.WriteTo(b, w.addr); err != nil {
-		return err
-	}
-	return nil
-}
+*/

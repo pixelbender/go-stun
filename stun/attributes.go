@@ -1,42 +1,39 @@
 package stun
 
 import (
-	"encoding/binary"
 	"fmt"
 	"github.com/pixelbender/go-stun/mux"
 	"net"
-	"reflect"
-	"strconv"
-	"time"
+	"sync"
 )
 
 const (
 	// Attributes introduced by the RFC 5389 Section 18.2.
-	AttrMappedAddress     attr = 0x0001
-	AttrXorMappedAddress  attr = 0x0020
-	AttrUsername          attr = 0x0006
-	AttrMessageIntegrity  attr = 0x0008
-	AttrErrorCode         attr = 0x0009
-	AttrRealm             attr = 0x0014
-	AttrNonce             attr = 0x0015
+	AttrMappedAddress attr = 0x0001
+	AttrXorMappedAddress attr = 0x0020
+	AttrUsername attr = 0x0006
+	AttrMessageIntegrity attr = 0x0008
+	AttrErrorCode attr = 0x0009
+	AttrRealm attr = 0x0014
+	AttrNonce attr = 0x0015
 	AttrUnknownAttributes attr = 0x000a
-	AttrSoftware          attr = 0x8022
-	AttrAlternateServer   attr = 0x8023
-	AttrFingerprint       attr = 0x8028
+	AttrSoftware attr = 0x8022
+	AttrAlternateServer attr = 0x8023
+	AttrFingerprint attr = 0x8028
 
 	// Attributes introduced by the RFC 5780 Section 7.
-	AttrChangeRequest  attr = 0x0003
-	AttrPadding        attr = 0x0026
-	AttrResponsePort   attr = 0x0027
+	AttrChangeRequest attr = 0x0003
+	AttrPadding attr = 0x0026
+	AttrResponsePort attr = 0x0027
 	AttrResponseOrigin attr = 0x802b
-	AttrOtherAddress   attr = 0x802c
+	AttrOtherAddress attr = 0x802c
 
 	// Attributes introduced by the RFC 3489 Section 11.2 except listed above.
 	AttrResponseAddress attr = 0x0002
-	AttrSourceAddress   attr = 0x0004
-	AttrChangedAddress  attr = 0x0005
-	AttrPassword        attr = 0x0007
-	AttrReflectedFrom   attr = 0x000b
+	AttrSourceAddress attr = 0x0004
+	AttrChangedAddress attr = 0x0005
+	AttrPassword attr = 0x0007
+	AttrReflectedFrom attr = 0x000b
 )
 
 var attrNames = map[attr]string{
@@ -63,25 +60,18 @@ var attrNames = map[attr]string{
 	AttrReflectedFrom:     "REFLECTED-FROM",
 }
 
-func RegisterAttribute(at Attr) Attr {
-	return attr(at)
-}
-
-func getAttribute(typ uint16) (at Attr, known bool) {
-
-}
-
 type attr uint16
 
 func (at attr) Type() uint16 {
 	return uint16(at)
 }
 
-func (at attr) Decode(m *Message, r mux.Reader) (v interface{}, err error) {
+func (at attr) Decode(p *Packet, r mux.Reader) (v interface{}, err error) {
 	var b []byte
 	switch at {
-	case AttrMappedAddress, AttrXorMappedAddress, AttrAlternateServer, AttrResponseOrigin,
-		AttrOtherAddress, AttrResponseAddress, AttrSourceAddress, AttrChangedAddress, AttrReflectedFrom:
+	case AttrMappedAddress, AttrXorMappedAddress, AttrAlternateServer,
+		AttrResponseOrigin, AttrOtherAddress, AttrResponseAddress,
+		AttrSourceAddress, AttrChangedAddress, AttrReflectedFrom:
 		if b, err = r.Next(4); err != nil {
 			return
 		}
@@ -92,29 +82,30 @@ func (at attr) Decode(m *Message, r mux.Reader) (v interface{}, err error) {
 		if b, err = r.Next(n); err != nil {
 			return
 		}
-		ip := make([]net.IP, len(b))
+		ip := make([]byte, len(b))
 		if at == AttrXorMappedAddress {
 			for i, it := range b {
-				ip[i] = it ^ m.Transaction[i]
+				ip[i] = it ^ p.Transaction[i]
 			}
 			port = port ^ 0x2112
 		} else {
 			copy(ip, b)
 		}
-		return &Addr{IP: ip, Port: port}, nil
+		return &Addr{IP: net.IP(ip), Port: port}, nil
 	case AttrErrorCode:
 		if b, err = r.Next(4); err != nil {
 			return
 		}
 		v = &ErrorCode{
-			Code:   int(b[2])*100 + int(b[3]),
+			Code:   int(b[2]) * 100 + int(b[3]),
 			Reason: string(r.Bytes()),
 		}
 	case AttrUnknownAttributes:
-		attrs := make(unknownAttributes, 0, r.Buffered()>>1)
-		for r.Buffered() > 2 {
-			b, _ := r.Next(2)
+		b := r.Bytes()
+		attrs := make([]uint16, 0, len(b) >> 1)
+		for len(b) > 2 {
 			attrs = append(attrs, be.Uint16(b))
+			b = b[2:]
 		}
 	case AttrUsername, AttrRealm, AttrNonce, AttrSoftware, AttrPassword:
 		v = string(r.Bytes())
@@ -123,17 +114,20 @@ func (at attr) Decode(m *Message, r mux.Reader) (v interface{}, err error) {
 			return
 		}
 		v = be.Uint32(b)
+	case AttrMessageIntegrity:
+		v = r.Bytes()
 	}
 	return
 }
 
-func (at attr) Encode(m *Message, v interface{}, w mux.Writer) error {
+func (at attr) Encode(p *Packet, w mux.Writer, v interface{}) error {
 	if raw, ok := v.([]byte); ok {
 		copy(w.Next(len(raw)), raw)
 	}
 	switch at {
-	case AttrMappedAddress, AttrXorMappedAddress, AttrAlternateServer, AttrResponseOrigin,
-		AttrOtherAddress, AttrResponseAddress, AttrSourceAddress, AttrChangedAddress, AttrReflectedFrom:
+	case AttrMappedAddress, AttrXorMappedAddress, AttrAlternateServer,
+		AttrResponseOrigin, AttrOtherAddress, AttrResponseAddress,
+		AttrSourceAddress, AttrChangedAddress, AttrReflectedFrom:
 		if addr, ok := v.(*Addr); ok {
 			fam, sh := byte(0x01), addr.IP.To4()
 			if len(sh) == 0 {
@@ -143,10 +137,10 @@ func (at attr) Encode(m *Message, v interface{}, w mux.Writer) error {
 			b[0] = 0
 			b[1] = fam
 			if at == AttrXorMappedAddress {
-				be.PutUint16(b[2:], uint16(addr.Port)^0x2112)
+				be.PutUint16(b[2:], uint16(addr.Port) ^ 0x2112)
 				b = b[4:]
 				for i, it := range sh {
-					b[i] = it ^ m.Transaction[i]
+					b[i] = it ^ p.Transaction[i]
 				}
 			} else {
 				be.PutUint16(b[2:], uint16(addr.Port))
@@ -163,10 +157,10 @@ func (at attr) Encode(m *Message, v interface{}, w mux.Writer) error {
 			copy(b[4:], err.Reason)
 		}
 	case AttrUnknownAttributes:
-		if attrs, ok := v.(unknownAttributes); ok {
+		if attrs, ok := v.([]uint16); ok {
 			b := w.Next(len(attrs) << 1)
 			for i, it := range attrs {
-				be.PutUint16(b[i<<1:], it)
+				be.PutUint16(b[i << 1:], it)
 			}
 		}
 	case AttrUsername, AttrRealm, AttrNonce, AttrSoftware, AttrPassword:
@@ -188,67 +182,54 @@ func (at attr) String() string {
 	return fmt.Sprintf("0x%4x", at)
 }
 
-// ErrorCode represents the ERROR-CODE attribute.
-type ErrorCode interface {
-	Code() int
-	Error() string
-}
-
-// Addr represents a transport address attribute.
-type Addr struct {
-	IP   net.IP
-	Port int
-}
-
-func (addr *Addr) String() string {
-	return net.JoinHostPort(addr.IP.String(), strconv.Itoa(addr.Port))
-}
-
-type unknownAttributes []uint16
-
 const (
 	// Error codes introduced by the RFC 5389 Section 15.6
-	ErrTryAlternate     code = 300
-	ErrBadRequest       code = 400
-	ErrUnauthorized     code = 401
-	ErrUnknownAttribute code = 420
-	ErrStaleNonce       code = 438
-	ErrServerError      code = 500
+	CodeTryAlternate int = 300
+	CodeBadRequest int = 400
+	CodeUnauthorized int = 401
+	CodeUnknownAttribute int = 420
+	CodeStaleNonce int = 438
+	CodeServerError int = 500
 
 	// Error codes introduced by the RFC 3489 Section 11.2.9 except listed in RFC 5389.
-	ErrStaleCredentials      code = 430
-	ErrIntegrityCheckFailure code = 431
-	ErrMissingUsername       code = 432
-	ErrUseTLS                code = 433
-	ErrGlobalFailure         code = 600
+	CodeStaleCredentials int = 430
+	CodeIntegrityCheckFailure int = 431
+	CodeMissingUsername int = 432
+	CodeUseTLS int = 433
+	CodeGlobalFailure int = 600
 )
 
-var errorText = map[code]string{
-	ErrTryAlternate:          "Try alternate",
-	ErrBadRequest:            "Bad request",
-	ErrUnauthorized:          "Unauthorized",
-	ErrUnknownAttribute:      "Unknown attribute",
-	ErrStaleCredentials:      "Stale credentials",
-	ErrIntegrityCheckFailure: "Integrity check failure",
-	ErrMissingUsername:       "Missing username",
-	ErrUseTLS:                "Use TLS",
-	ErrStaleNonce:            "Stale nonce",
-	ErrServerError:           "Server error",
-	ErrGlobalFailure:         "Global failure",
+var errorText = map[int]string{
+	CodeTryAlternate:          "Try alternate",
+	CodeBadRequest:            "Bad request",
+	CodeUnauthorized:          "Unauthorized",
+	CodeUnknownAttribute:      "Unknown attribute",
+	CodeStaleCredentials:      "Stale credentials",
+	CodeIntegrityCheckFailure: "Integrity check failure",
+	CodeMissingUsername:       "Missing username",
+	CodeUseTLS:                "Use TLS",
+	CodeStaleNonce:            "Stale nonce",
+	CodeServerError:           "Server error",
+	CodeGlobalFailure:         "Global failure",
 }
 
-func NewError(c int) ErrorCode {
-	return code(c)
+func ErrorText(code int) string {
+	return errorText[code]
 }
 
-type code int
+var (
+	mu = sync.Mutex{}
+	attributes = map[uint16]Attr{}
+)
 
-func (c code) Code() int {
-	return int(c)
+func RegisterAttribute(at Attr) {
+	mu.Lock()
+	attributes[at.Type()] = at
+	mu.Unlock()
 }
 
-func (c code) Error() string {
-	return errorText[c]
+func init() {
+	for at := range attrNames {
+		RegisterAttribute(at)
+	}
 }
-
-var be = binary.BigEndian

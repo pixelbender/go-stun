@@ -1,126 +1,90 @@
 package mux
 
 import (
+	"io"
 	"net"
-	"context"
 )
 
 // A Conn is a multiplexed connection over net.Conn interface.
-type Conn interface {
+type Transport struct {
 	net.Conn
-	ReadMatch(ctx context.Context, match func(b []byte) int) <-chan Reader
-	Handle(h func(Transport, *Reader) error) func()
-	NewPacket() Packet
-}
-
-type Packet interface {
-	Next(n int) []byte
-	Send() int
+	m *Mux
 }
 
 // NewConn creates a multiplexed connection over net.Conn interface.
-func NewConn(c net.Conn) Conn {
-	if _, ok := c.(net.PacketConn); ok {
-		return &packetConn{Conn: c, mux: &Mux{}}
+func NewTransport(inner net.Conn) *Transport {
+	return &Transport{Conn: inner, m: &Mux{}}
+}
+
+func (t *Transport) Send(enc func(Writer) error) error {
+	return encodeAndSend(t.Conn, enc)
+}
+
+func (t *Transport) Receive(dec func(Conn, Reader) error) *Handler {
+	return t.m.Receive(dec)
+}
+
+func (t *Transport) Serve() error {
+	if _, udp := t.Conn.(net.PacketConn); udp {
+		return t.servePacket()
 	}
-	return &streamConn{Conn: c, mux: &Mux{}}
+	return t.serveStream()
 }
 
-type packetConn struct {
-	net.Conn
-	mux *Mux
-}
+func (t *Transport) servePacket() error {
+	defer t.Close()
 
-func (c *packetConn) NewPacket() Packet {
+	buf := bufferPool.Get().([]byte)
+	defer bufferPool.Put(buf)
 
-}
-
-func (c *packetConn) Handle(h func(Transport, *Reader) error) {
-	c.mux.Handle(h)
-}
-
-func (c *packetConn) Serve() error {
-	defer c.Close()
-
-	pool := c.mux.getBufferPool()
-	buf := pool.Get().([]byte)
-	defer pool.Put(buf)
-
-	r := &Reader{}
 	for {
-		c.mux.setDeadline(c.Conn)
-		n, err := c.Read(buf)
+		n, err := t.Read(buf)
 		if err != nil {
 			return err
 		}
 		if n > 0 {
-			r.buf, r.pos = buf[:n], 0
-			if err = c.mux.handle(c, r); err != nil {
-				return err
-			}
+			t.m.serve(t, &reader{buf: buf[:n]})
 		}
 	}
 }
 
-func (c *packetConn) Write(p []byte) (int, error) {
-	c.mux.setDeadline(c.Conn)
-	return c.Conn.Write(p)
-}
+func (t *Transport) serveStream() error {
+	defer t.Close()
 
-func (c *packetConn) Send(enc func(*Writer) error) error {
-	return c.mux.send(c.Conn, enc)
-}
+	buf := bufferPool.Get().([]byte)
+	defer bufferPool.Put(buf)
 
-func (packetConn) Network() string {
-	return "udp"
-}
-
-type streamConn struct {
-	net.Conn
-	mux *Mux
-}
-
-func (c *streamConn) Handle(h func(Transport, *Reader) error) {
-	c.mux.Handle(h)
-}
-
-func (c *streamConn) Serve() error {
-	defer c.Close()
-
-	pool := c.mux.getBufferPool()
-	buf := pool.Get().([]byte)
-	defer pool.Put(buf)
-
-	r := &Reader{buf: buf[:0], fill: c.Read}
+	r := &streamReader{r: t.Conn, pre: buf}
 	for {
-		c.mux.setDeadline(c.Conn)
-		_, err := r.Peek(r.Buffered() + 1)
+		err := r.fill()
 		if err != nil {
 			return err
 		}
-		n := r.counter
-		for r.Buffered() > 0 {
-			if err = c.mux.handle(c, r); err != nil {
+		for {
+			r.changed = false
+			if err = t.m.serve(t, r); err != nil {
 				return err
 			}
-			if n == r.counter {
-				break
-			} else {
-				n = r.counter
+			if r.changed {
+				continue
 			}
+			break
 		}
+		//log.Printf("%v", len(r.Bytes()))
 	}
 }
 
-func (c *streamConn) Write(p []byte) (int, error) {
-	c.mux.setDeadline(c.Conn)
-	return c.Conn.Write(p)
+type Conn interface {
+	io.WriteCloser
 }
 
-func (c *streamConn) Send(enc func(*Writer) error) error {
-	return c.mux.send(c.Conn, enc)
-}
-
-func (streamConn) Network() string {
-	return "tcp"
+func encodeAndSend(out io.Writer, enc func(Writer) error) (err error) {
+	buf := bufferPool.Get().([]byte)
+	defer bufferPool.Put(buf)
+	w := &writer{buf: buf}
+	if err = enc(w); err != nil {
+		return
+	}
+	_, err = out.Write(w.Bytes())
+	return
 }
