@@ -3,6 +3,7 @@ package mux
 import (
 	"io"
 	"net"
+	"sync"
 )
 
 // A Conn is a multiplexed connection over net.Conn interface.
@@ -87,4 +88,10 @@ func encodeAndSend(out io.Writer, enc func(Writer) error) (err error) {
 	}
 	_, err = out.Write(w.Bytes())
 	return
+}
+
+var bufferPool = &sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 1024)
+	},
 }

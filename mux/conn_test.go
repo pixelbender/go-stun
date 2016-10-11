@@ -3,7 +3,6 @@ package mux
 import (
 	"io"
 	"net"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -25,7 +24,7 @@ func TestPacketConn(t *testing.T) {
 	c, _ := net.Dial("udp", l.LocalAddr().String())
 	defer c.Close()
 
-	count := 1000
+	count := 100
 	done := make(chan bool, 100)
 
 	a := &Agent{}
@@ -75,15 +74,12 @@ func TestConn(t *testing.T) {
 	c, _ := net.Dial("tcp", l.Addr().String())
 	defer c.Close()
 
-	count := 1000
+	count := 100
 	done := make(chan bool, 100)
 
 	a := &Agent{}
 	a.Receive(EchoServer)
 	go a.Serve(l)
-
-	sent := int64(0)
-	recv := int64(0)
 
 	m := NewTransport(c)
 	m.Receive(func(t Conn, r Reader) error {
@@ -93,7 +89,6 @@ func TestConn(t *testing.T) {
 		}
 		if string(b[:4]) == "ping" {
 			r.Next(4)
-			atomic.AddInt64(&recv, 1)
 			done <- true
 			return nil
 		}
@@ -102,10 +97,12 @@ func TestConn(t *testing.T) {
 	go m.Serve()
 
 	go func() {
-		for i := 0; i < count; i++ {
-			m.Write([]byte("ping"))
-			atomic.AddInt64(&sent, 1)
-		}
+		m.Send(func(w Writer) error {
+			for i := 0; i < count; i++ {
+				copy(w.Next(4), "ping")
+			}
+			return nil
+		})
 	}()
 
 	ok := 0
@@ -117,5 +114,4 @@ func TestConn(t *testing.T) {
 			t.Fatal("timeout")
 		}
 	}
-
 }

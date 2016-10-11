@@ -2,62 +2,12 @@ package mux
 
 import (
 	"io"
-	"sync"
 )
-
-var bufferPool = &sync.Pool{
-	New: func() interface{} {
-		return make([]byte, 2048)
-	},
-}
-
-type Writer interface {
-	io.Writer
-	Next(n int) []byte
-	Header(n int) Header
-	Bytes() []byte
-}
-
-type Header interface {
-	Payload() int
-	Bytes() []byte
-}
 
 type Reader interface {
 	io.Reader
 	Next(n int) (b []byte, err error)
 	Bytes() []byte
-}
-
-type writer struct {
-	buf []byte
-	pos int
-}
-
-func (w *writer) Next(n int) (b []byte) {
-	p := w.pos + n
-	if len(w.buf) < p {
-		b := make([]byte, (1+((p-1)>>10))<<10)
-		if w.pos > 0 {
-			copy(b, w.buf[:w.pos])
-		}
-		w.buf = b
-	}
-	b, w.pos = w.buf[w.pos:p], p
-	return
-}
-
-func (w *writer) Header(n int) Header {
-	w.Next(n)
-	return &header{w, w.pos - n, w.pos}
-}
-
-func (w *writer) Write(p []byte) (int, error) {
-	return copy(w.Next(len(p)), p), nil
-}
-
-func (w *writer) Bytes() []byte {
-	return w.buf[:w.pos]
 }
 
 type reader struct {

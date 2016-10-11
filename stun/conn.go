@@ -21,6 +21,9 @@ type Config struct {
 	// Retransmission timeout, default is 500ms
 	RetransmissionTimeout time.Duration
 
+	// GetAttribute returns attibute by its type.
+	GetAttribute func(at uint16) Attr
+
 	// Transaction timeout, default is 39.5 seconds
 	TransactionTimeout time.Duration
 
@@ -136,8 +139,8 @@ func (t *Transport) RoundTrip(m *Message) (*Message, error) {
 	}
 	deadline := time.Now().Add(t.config.getTransactionTimeout())
 	p := &Packet{
-		Message: m,
-		Key:     t.key,
+		Message:     m,
+		Key:         t.key,
 		Transaction: NewTransaction(),
 	}
 	ch := t.newTx(p.Transaction)

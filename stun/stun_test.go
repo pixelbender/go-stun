@@ -10,9 +10,14 @@ import (
 
 func TestGoogle(t *testing.T) {
 	t.Parallel()
-	_, err := Discover("stun:stun.l.google.com:19302", "username", "password")
+	addr, err := Discover("stun:stun.l.google.com:19302", "username", "password")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if v, ok := addr.(*Addr); ok {
+		t.Logf("!! %+v", v)
+	} else {
+		t.Fatal("address error")
 	}
 }
 

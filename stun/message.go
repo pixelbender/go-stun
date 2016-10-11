@@ -1,6 +1,7 @@
 package stun
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/binary"
@@ -8,11 +9,10 @@ import (
 	"github.com/pixelbender/go-stun/mux"
 	"hash/crc32"
 	"io"
+	"math/rand"
 	"net"
 	"strconv"
 	"time"
-	"math/rand"
-	"bytes"
 )
 
 const MethodBinding uint16 = 0x0001
@@ -24,33 +24,6 @@ const (
 	TypeResponse   uint16 = 0x0100
 	TypeError      uint16 = 0x0110
 )
-
-// Addr represents a transport address attribute.
-type Addr struct {
-	IP   net.IP
-	Port int
-}
-
-func (addr *Addr) Network() string {
-	return "udp"
-}
-
-func (addr *Addr) String() string {
-	return net.JoinHostPort(addr.IP.String(), strconv.Itoa(addr.Port))
-}
-
-type Attr interface {
-	Type() uint16
-	Encode(p *Packet, w mux.Writer, v interface{}) error
-	Decode(p *Packet, r mux.Reader) (interface{}, error)
-	String() string
-}
-
-// ErrorCode represents the ERROR-CODE attribute.
-type ErrorCode struct {
-	Code   int
-	Reason string
-}
 
 // Message represents a STUN message.
 type Message struct {
@@ -100,8 +73,7 @@ type Packet struct {
 	*Message
 	Transaction Transaction
 	Key         []byte
-	Integrity []byte
-	Fingerprint bool
+	Payload     []byte
 }
 
 func (p *Packet) Encode(w mux.Writer) (err error) {
@@ -189,7 +161,7 @@ func (p *Packet) Decode(r mux.Reader) (err error) {
 			return mux.ErrFormat
 		}
 		at := be.Uint16(a)
-		attr, known := attributes[at]
+		attr, known := p.config.GetAttribute(at)
 		n := int(be.Uint16(a[2:])) + 4
 		next := n
 		if padding := n & 3; padding != 0 {
@@ -212,11 +184,11 @@ func (p *Packet) Decode(r mux.Reader) (err error) {
 		p.Add(attr, v)
 		if attr == AttrMessageIntegrity {
 			be.PutUint16(b[2:], uint16(pos+next-20))
-			p.Integrity = b[:pos]
+			p.Payload = b[:pos]
 			break
 		} else if attr == AttrFingerprint {
 			be.PutUint16(b[2:], uint16(pos+next-20))
-			if p.Fingerprint && fingerprint(b[:pos]) != v.(uint32) {
+			if p.config.Fingerprint && fingerprint(b[:pos]) != v.(uint32) {
 				return ErrIncorrectFingerprint
 			}
 			break
@@ -264,4 +236,18 @@ func NewTransaction() Transaction {
 
 func (tx Transaction) Reset() {
 	random.Read(tx[4:])
+}
+
+// Addr represents a transport address.
+type Addr struct {
+	IP   net.IP
+	Port int
+}
+
+func (addr *Addr) Network() string {
+	return "udp" // TODO: change
+}
+
+func (addr *Addr) String() string {
+	return net.JoinHostPort(addr.IP.String(), strconv.Itoa(addr.Port))
 }

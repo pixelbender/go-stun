@@ -1,4 +1,6 @@
-# Golang: STUN, TURN and ICE Protocols
+# go-stun
+
+Go implementation of STUN, TURN and ICE Protocols
 
 [![Build Status](https://travis-ci.org/pixelbender/go-stun.svg)](https://travis-ci.org/pixelbender/go-stun)
 [![Coverage Status](https://coveralls.io/repos/github/pixelbender/go-stun/badge.svg?branch=master)](https://coveralls.io/github/pixelbender/go-stun?branch=master)
@@ -10,7 +12,7 @@
 - [x] STUN Encoder/Decoder
 - [x] STUN Client/Server
 - [x] STUN Authorization
-- [ ] STUN Transactions
+- [x] STUN Transactions
 - [ ] STUN Multiplexing
 - [ ] STUN Redirection
 - [x] ICE Messages

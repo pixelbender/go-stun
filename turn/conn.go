@@ -15,15 +15,11 @@ var errBadResponse = errors.New("turn: bad response")
 var defaultLifetime = 10 * time.Minute
 
 type Config struct {
-	// GetAuthKey returns a key for a MESSAGE-INTEGRITY attribute generation and validation.
-	// See stun.Config for details.
-	GetAuthKey func(m *stun.Message) ([]byte, error)
-	// Software is a value for SOFTWARE attribute.
-	Software string
+	Stun stun.Config
 }
 
 type Conn struct {
-	stun.Conn
+	*stun.Transport
 
 	config *Config
 	transport uint8
@@ -42,6 +38,12 @@ func NewConn(inner net.Conn, config *Config) *Conn {
 	m := mux.NewTransport(inner)
 	c := NewConnMux(m, config)
 	go m.Serve()
+	return c
+}
+
+func NewConnStun(m *stun.Transport, config *Config) *Conn {
+	c := &Conn{Conn: m, config: config}
+	m.Handle(c.ServeMux)
 	return c
 }
 
