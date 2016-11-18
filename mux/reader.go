@@ -14,13 +14,9 @@ type reader struct {
 	buf []byte
 }
 
-func NewReader(buf []byte) Reader {
-	return &reader{buf: buf}
-}
-
 func (r *reader) Next(n int) (b []byte, err error) {
 	if len(r.buf) < n {
-		b, err, r.buf = r.buf, io.EOF, nil
+		err = io.EOF
 		return
 	}
 	b, r.buf = r.buf[:n], r.buf[n:]
@@ -40,78 +36,38 @@ func (r *reader) Bytes() []byte {
 
 type streamReader struct {
 	reader
-	r       io.Reader
-	pre     []byte
-	changed bool
-	z       int64
+	src io.Reader
+	pre []byte
 }
 
-func (r *streamReader) fill() (err error) {
-	off := len(r.buf)
-	if off > 0 {
+func (r *streamReader) Fill() (n int, err error) {
+	s := len(r.buf)
+	if s == len(r.pre) {
+		return 0, ErrBufferOverflow
+	}
+	if s > 0 {
 		copy(r.pre, r.buf)
 	}
-	if off == len(r.pre) {
-		return ErrBufferOverflow
-	}
-	var n int
-	n, err = r.r.Read(r.pre[off:])
-	r.z += int64(n)
-	r.buf = r.pre[:off+n]
+	n, err = r.src.Read(r.pre[s:])
+	r.buf = r.pre[:s+n]
 	return
 }
 
-func (r *streamReader) Next(n int) (b []byte, err error) {
+func (r *streamReader) Next(n int) ([]byte, error) {
 	if len(r.buf) < n {
-		err = r.fill()
-		if len(r.buf) < n {
-			if err == nil {
-				err = io.EOF
-			}
-			b, r.buf = r.buf, nil
-			if len(b) > 0 {
-				r.changed = true
-			}
-			return
-		}
+		r.Fill()
 	}
-	b, r.buf = r.buf[:n], r.buf[n:]
-	if len(b) > 0 {
-		r.changed = true
-	}
-	return
+	return r.reader.Next(n)
 }
 
 func (r *streamReader) Read(p []byte) (n int, err error) {
-	b := r.Bytes()
-	if len(p) > len(b) {
-		off := copy(p, b)
+	if len(r.buf) < len(p) {
+		off := copy(p, r.buf)
 		r.buf = nil
-		n, err = r.r.Read(p[off:])
+		n, err = r.src.Read(p[off:])
 		n += off
 	} else {
-		b, err = r.Next(len(p))
-		n = copy(p, b)
-	}
-	if n > 0 {
-		r.changed = true
+		return r.reader.Read(p)
 	}
 	return
-}
-
-func (r *streamReader) Bytes() []byte {
-	return r.buf
-}
-
-type header struct {
-	*writer
-	from, to int
-}
-
-func (h *header) Payload() int {
-	return h.pos - h.to
-}
-
-func (h *header) Bytes() []byte {
-	return h.buf[h.from:h.to]
 }

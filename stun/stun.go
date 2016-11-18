@@ -1,6 +1,8 @@
+// Package stun provides a interface for STUN protocol.
 package stun
 
 import (
+	"crypto/md5"
 	"crypto/tls"
 	"errors"
 	"net"
@@ -9,33 +11,40 @@ import (
 )
 
 // Dial connects to the given STUN URI.
-func Dial(uri, username, password string) (*Conn, error) {
+func Dial(uri string, config *Config) (conn *Conn, err error) {
 	u, err := url.Parse(uri)
 	if err != nil {
-		return nil, err
+		return
 	}
-	var conn net.Conn
+	var c net.Conn
+	host, port, err := net.SplitHostPort(u.Opaque)
+	if err != nil {
+		host = u.Opaque
+	}
 	switch strings.ToLower(u.Scheme) {
 	case "stun":
-		conn, err = net.Dial("udp", getServerAddress(u.Opaque, false))
+		if port == "" {
+			port = "3478"
+		}
+		c, err = net.Dial("udp", net.JoinHostPort(host, port))
 	case "stuns":
-		conn, err = tls.Dial("tcp", getServerAddress(u.Opaque, true), nil)
+		if port == "" {
+			port = "5478"
+		}
+		c, err = tls.Dial("tcp", net.JoinHostPort(host, port), nil)
 	default:
-		err = errUnsupportedScheme
+		err = errors.New("stun: unsupported scheme: " + u.Scheme)
 	}
 	if err != nil {
-		return nil, err
+		return
 	}
-	config := &Config{
-	//GetAuthKey: LongTermAuthKey(username, password),
-	}
-	return NewConn(conn, config), nil
+	return NewConn(c, config), nil
 }
 
 // Discover connects to the given STUN URI and sends the STUN binding request.
 // Returns the discovered server reflexive transport address.
-func Discover(uri, username, password string) (net.Addr, error) {
-	c, err := Dial(uri, username, password)
+func Discover(uri string) (*Addr, error) {
+	c, err := Dial(uri, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -58,32 +67,19 @@ func ListenAndServeTLS(network, addr string, certFile, keyFile string, handler H
 }
 */
 
-/*
-func LongTermAuthKey(username, password string) func(attrs Attributes) ([]byte, error) {
-	return func(attrs Attributes) ([]byte, error) {
-		if attrs.Has(AttrRealm) {
-			attrs[AttrUsername] = username
-			h := md5.New()
-			h.Write([]byte(username + ":" + attrs.String(AttrRealm) + ":" + password))
-			return h.Sum(nil), nil
-		}
-		return nil, nil
-	}
-}*/
+type AuthMethod func(m *Message) ([]byte, error)
 
-var errUnsupportedScheme = errors.New("stun: unsupported scheme")
+func LongTermAuthMethod(username, password string) AuthMethod {
+	return func(m *Message) ([]byte, error) {
+		h := md5.New()
+		h.Write([]byte(username + ":" + m.GetString(AttrRealm) + ":" + password))
+		return h.Sum(nil), nil
+	}
+}
 
-func getServerAddress(hostport string, secure bool) string {
-	host, port, err := net.SplitHostPort(hostport)
-	if err != nil {
-		host = hostport
+func ShotTermAuthMethod(key string) AuthMethod {
+	b := []byte(key)
+	return func(m *Message) ([]byte, error) {
+		return b, nil
 	}
-	if port == "" {
-		if secure {
-			port = "5478"
-		} else {
-			port = "3478"
-		}
-	}
-	return net.JoinHostPort(host, port)
 }

@@ -8,22 +8,12 @@ import (
 type Writer interface {
 	io.Writer
 	Next(n int) []byte
-	Header(n int) Header
-	Bytes() []byte
-}
-
-type Header interface {
-	Payload() int
-	Bytes() []byte
+	WriteString(p string) (int, error)
 }
 
 type writer struct {
 	buf []byte
 	pos int
-}
-
-func NewWriter(b []byte) Writer {
-	return &writer{buf: b}
 }
 
 func (w *writer) grow(n int) {
@@ -60,12 +50,11 @@ func (w *writer) Next(n int) (b []byte) {
 	return
 }
 
-func (w *writer) Header(n int) Header {
-	w.Next(n)
-	return &header{w, w.pos - n, w.pos}
+func (w *writer) Write(p []byte) (int, error) {
+	return copy(w.Next(len(p)), p), nil
 }
 
-func (w *writer) Write(p []byte) (int, error) {
+func (w *writer) WriteString(p string) (int, error) {
 	return copy(w.Next(len(p)), p), nil
 }
 

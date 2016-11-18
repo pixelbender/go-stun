@@ -37,7 +37,7 @@ func (config *Config) getPriority(cand *Candidate) (v uint32) {
 
 // Agent represents an ICE agent.
 type Agent struct {
-	mux.Agent
+	mux.Server
 
 	config *Config
 

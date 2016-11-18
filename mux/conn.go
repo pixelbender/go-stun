@@ -4,93 +4,113 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 )
 
-// A Conn is a multiplexed connection over net.Conn interface.
-type Transport struct {
+type Unmarshal func([]byte) (int, error)
+type Marshal func([]byte) []byte
+
+type Conn interface {
+	io.Writer
+	Reliable() bool
+	LocalAddr() net.Addr
+	RemoteAddr() net.Addr
+	SetDeadline(t time.Time) error
+	Send(m Marshal) error
+	Receive(u Unmarshal, t time.Duration) error
+	Close() error
+}
+
+func NewConn(inner net.Conn, m *Mux) Conn {
+	_, ok := inner.(net.PacketConn)
+	c := &conn{inner, m, !ok}
+	go c.serve()
+	return c
+}
+
+type conn struct {
 	net.Conn
-	m *Mux
+	m        *Mux
+	reliable bool
 }
 
-// NewConn creates a multiplexed connection over net.Conn interface.
-func NewTransport(inner net.Conn) *Transport {
-	return &Transport{Conn: inner, m: &Mux{}}
+func (c *conn) Reliable() bool {
+	return c.reliable
 }
 
-func (t *Transport) Send(enc func(Writer) error) error {
-	return encodeAndSend(t.Conn, enc)
+func (c *conn) Receive(u Unmarshal, t time.Duration) error {
+	return c.m.Receive(u, t)
 }
 
-func (t *Transport) Receive(dec func(Conn, Reader) error) *Handler {
-	return t.m.Receive(dec)
-}
-
-func (t *Transport) Serve() error {
-	if _, udp := t.Conn.(net.PacketConn); udp {
-		return t.servePacket()
+func (c *conn) serve() error {
+	defer c.m.Close()
+	defer c.Conn.Close()
+	if _, ok := c.Conn.(net.PacketConn); ok {
+		return c.servePacket()
 	}
-	return t.serveStream()
+	return c.serveStream()
 }
 
-func (t *Transport) servePacket() error {
-	defer t.Close()
+func (c *conn) serveStream() error {
+	b := pool.Get().([]byte)
+	defer pool.Put(b)
 
-	buf := bufferPool.Get().([]byte)
-	defer bufferPool.Put(buf)
+	pos := 0
+	for {
+		if pos >= len(b) {
+			return ErrBufferOverflow
+		}
+		n, err := c.Read(b[pos:])
+		if err != nil {
+			return err
+		}
+		pos += n
+		n = 0
+		for n < pos {
+			s, err := c.m.handle(c, b[n:pos])
+			if err != nil {
+				return err
+			}
+			if s == 0 {
+				break
+			}
+			n += s
+		}
+		if 0 < n && n < pos {
+			copy(b, b[n:pos])
+			pos -= n
+		}
+	}
+}
+
+func (c *conn) servePacket() error {
+	b := pool.Get().([]byte)
+	defer pool.Put(b)
 
 	for {
-		n, err := t.Read(buf)
+		n, err := c.Read(b)
 		if err != nil {
 			return err
 		}
 		if n > 0 {
-			t.m.serve(t, &reader{buf: buf[:n]})
+			c.m.handle(c, b[:n])
 		}
 	}
 }
 
-func (t *Transport) serveStream() error {
-	defer t.Close()
-
-	buf := bufferPool.Get().([]byte)
-	defer bufferPool.Put(buf)
-
-	r := &streamReader{r: t.Conn, pre: buf}
-	for {
-		err := r.fill()
-		if err != nil {
-			return err
-		}
-		for {
-			r.changed = false
-			if err = t.m.serve(t, r); err != nil {
-				return err
-			}
-			if r.changed {
-				continue
-			}
-			break
-		}
-		//log.Printf("%v", len(r.Bytes()))
-	}
+func (c *conn) Send(m Marshal) error {
+	return marshalAndSend(m, c.Conn)
 }
 
-type Conn interface {
-	io.WriteCloser
-}
+func marshalAndSend(m Marshal, w io.Writer) (err error) {
+	b := pool.Get().([]byte)
+	defer pool.Put(b)
 
-func encodeAndSend(out io.Writer, enc func(Writer) error) (err error) {
-	buf := bufferPool.Get().([]byte)
-	defer bufferPool.Put(buf)
-	w := &writer{buf: buf}
-	if err = enc(w); err != nil {
-		return
-	}
-	_, err = out.Write(w.Bytes())
+	_, err = w.Write(m(b[:0]))
 	return
 }
 
-var bufferPool = &sync.Pool{
+var pool = &sync.Pool{
 	New: func() interface{} {
 		return make([]byte, 1024)
 	},

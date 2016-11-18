@@ -1,16 +1,18 @@
 package stun
 
 import (
+	"bytes"
 	"errors"
 	"github.com/pixelbender/go-stun/mux"
 	"io"
-	"log"
+	"math/rand"
 	"net"
-	"sync"
 	"time"
 )
 
-// Config represents a STUN connection configuration.
+var ErrTimeout = errors.New("stun: transaction timeout")
+var ErrBadResponse = errors.New("stun: bad response")
+
 type Config struct {
 	// GetAuthKey returns a key for a MESSAGE-INTEGRITY attribute generation and validation.
 	// Key = MD5(username ":" realm ":" SASLprep(password)) for long-term credentials.
@@ -21,195 +23,121 @@ type Config struct {
 	// Retransmission timeout, default is 500ms
 	RetransmissionTimeout time.Duration
 
-	// GetAttribute returns attibute by its type.
-	GetAttribute func(at uint16) Attr
-
 	// Transaction timeout, default is 39.5 seconds
 	TransactionTimeout time.Duration
 
-	// Fingerprint controls whether a FINGERPRINT attribute will be generated.
-	Fingerprint bool
-
-	// Software is a value for SOFTWARE attribute.
-	Software string
-
-	// Realm is a value for REALM attribute.
-	Realm string
+	AdditionalAttributes []Attr
 }
 
 func (c *Config) getRetransmissionTimeout() time.Duration {
-	if c.RetransmissionTimeout > 0 {
+	if c != nil && c.RetransmissionTimeout > 0 {
 		return c.RetransmissionTimeout
 	}
 	return 500 * time.Millisecond
 }
 
 func (c *Config) getTransactionTimeout() time.Duration {
-	if c.TransactionTimeout > 0 {
+	if c != nil && c.TransactionTimeout > 0 {
 		return c.TransactionTimeout
 	}
 	return 39500 * time.Millisecond
 }
 
-// A Conn represents the STUN connection and implements the STUN protocol over net.Conn interface.
+func (c *Config) setAttributes(m *Message) {
+	if c != nil {
+		m.Attributes = append(m.Attributes, c.AdditionalAttributes...)
+	}
+}
+
 type Conn struct {
-	*Transport
-	inner net.Conn
-}
-
-// NewConn creates a multiplexed connection over the c.
-func NewConn(c net.Conn, config *Config) *Conn {
-	t := NewTransport(mux.NewTransport(c), config)
-	go t.m.Serve()
-	return &Conn{t, c}
-}
-
-func (c *Conn) Close() error {
-	c.Transport.Close()
-	c.m.Close()
-	return c.inner.Close()
-}
-
-type Transport struct {
-	m      *mux.Transport
+	mux.Conn
 	config *Config
-	key    []byte
-
-	mu   sync.RWMutex
-	reqs map[string]chan *Packet
 }
 
-func NewTransport(m *mux.Transport, config *Config) *Transport {
-	if config == nil {
-		config = &Config{}
-	}
-	c := &Transport{m: m, config: config}
-	m.Receive(c.serve)
-	return c
+func NewConn(inner net.Conn, config *Config) *Conn {
+	return &Conn{mux.NewConn(inner, &mux.Mux{}), config}
 }
 
-func (t *Transport) serve(c mux.Conn, r mux.Reader) error {
-	b := r.Bytes()
-	if len(b) < 20 {
-		return io.EOF
-	}
-	t.mu.RLock()
-	ch := t.reqs[string(b[4:20])]
-	t.mu.RUnlock()
-	if ch == nil {
-		// Skip unknown transaction
-		n := int(be.Uint16(b[2:]))
-		r.Next(n)
-		return nil
-	}
-	p := &Packet{}
-	p.Key = t.key
-	err := p.Decode(r)
-	if err != nil {
-		return err
-	}
-	select {
-	case ch <- p:
-	default:
-	}
-	return nil
-}
-
-func (t *Transport) SendMessage(m *Message) error {
-	p := &Packet{}
-	p.Transaction = NewTransaction()
-	p.Key = t.key
-	return t.m.Send(p.Encode)
-}
-
-func (t *Transport) Discover() (*Addr, error) {
-	msg, err := t.RoundTrip(&Message{Method: MethodBinding})
+func (c *Conn) Discover() (*Addr, error) {
+	res, err := c.RoundTrip(&Message{Type: MethodBinding})
 	if err != nil {
 		return nil, err
 	}
-	log.Printf(">> %+v", msg)
-	return nil, nil
+	if err := res.GetError(); err != nil {
+		return nil, err
+	}
+	for _, typ := range []uint16{AttrXorMappedAddress, AttrMappedAddress} {
+		if addr, ok := res.Get(typ).(*Addr); ok {
+			return addr, nil
+		}
+	}
+	return nil, ErrBadResponse
 }
 
-// RoundTrip executes a single STUN transaction, returning a response for the provided request.
-func (t *Transport) RoundTrip(m *Message) (*Message, error) {
+func (c *Conn) RoundTrip(req *Message) (*Message, error) {
 	var rto time.Duration
-	if t.m.LocalAddr().Network() == "udp" {
-		rto = t.config.getRetransmissionTimeout()
+	if !c.Reliable() {
+		rto = c.config.getRetransmissionTimeout()
 	}
-	deadline := time.Now().Add(t.config.getTransactionTimeout())
-	p := &Packet{
-		Message:     m,
-		Key:         t.key,
-		Transaction: NewTransaction(),
-	}
-	ch := t.newTx(p.Transaction)
-	defer t.cancelTx(p.Transaction)
-	for {
+	deadline := time.Now().Add(c.config.getTransactionTimeout())
+
+	c.config.setAttributes(req)
+	tx := newTransaction(req)
+
+	for time.Now().Before(deadline) {
+		if err := c.Send(tx.Marshal); err != nil {
+			return nil, err
+		}
 		timeout := deadline.Sub(time.Now())
 		if timeout <= 0 {
 			break
 		} else if 0 < rto && rto < timeout {
 			timeout = rto
 		}
-		if err := t.m.Send(p.Encode); err != nil {
-			return nil, err
-		}
-		select {
-		case p, connected := <-ch:
-			if !connected {
-				return nil, ErrCancelled
-			}
-			return p.Message, nil
-		case <-time.After(timeout):
+		err := c.Receive(tx.Handle, timeout)
+		switch err {
+		case mux.ErrTimeout:
 			rto <<= 1
+		case nil:
+			return tx.res, nil
+		default:
+			return nil, err
 		}
 	}
 	return nil, ErrTimeout
 }
 
-func (t *Transport) newTx(tx Transaction) <-chan *Packet {
-	ch := make(chan *Packet, 10)
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.reqs == nil {
-		t.reqs = make(map[string]chan *Packet)
-	} else {
-		for {
-			if _, found := t.reqs[string(tx)]; !found {
-				break
-			}
-			tx.Reset()
-		}
+type transaction struct {
+	*Message
+	res *Message
+}
+
+func newTransaction(req *Message) *transaction {
+	b := make([]byte, 16)
+	copy(b, magicCookie)
+	random.Read(b[4:])
+
+	req.Transaction = b
+	return &transaction{req, &Message{}}
+}
+
+func (tx *transaction) Write(b []byte) []byte {
+	return tx.Marshal(b)
+}
+
+func (tx *transaction) Handle(b []byte) (int, error) {
+	if len(b) < 20 {
+		return 0, io.EOF
 	}
-	t.reqs[string(tx)] = ch
-	return ch
-}
-
-func (t *Transport) cancelTx(tx Transaction) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if ch, ok := t.reqs[string(tx)]; ok {
-		delete(t.reqs, string(tx))
-		close(ch)
+	if !bytes.Equal(b[4:20], tx.Transaction) {
+		return 0, io.EOF
 	}
-}
-
-func (t *Transport) Close() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for _, it := range t.reqs {
-		close(it)
+	n := int(be.Uint16(b[2:])) + 20
+	if len(b) < n {
+		return 0, io.EOF
 	}
-	t.reqs = nil
-	return nil
+	return n, tx.res.Unmarshal(b[:n])
 }
 
-var ErrTimeout = errors.New("i/o timeout")
-var ErrCancelled = errors.New("cancelled")
-
-type request struct {
-	Transaction
-	ch chan *Message
-	tr *Transport
-}
+var magicCookie = []byte{0x21, 0x12, 0xa4, 0x42}
+var random = rand.New(rand.NewSource(time.Now().Unix()))

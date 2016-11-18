@@ -175,12 +175,3 @@ func (c errCode) Code() int {
 func (c errCode) Error() string {
 	return errorText[c]
 }
-
-func init() {
-	for it := range attrNames {
-		stun.RegisterAttribute(it)
-	}
-	for it := range attrNames {
-		stun.RegisterErrorCode(it)
-	}
-}

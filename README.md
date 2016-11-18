@@ -41,7 +41,7 @@ import (
 )
 
 func main() {
-	addr, err := stun.Discover("stun:stun.l.google.com:19302", "username", "password")
+	addr, err := stun.Discover("stun:stun.l.google.com:19302")
 	if err != nil {
 		fmt.Println(err)
 	} else {

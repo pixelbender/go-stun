@@ -35,7 +35,7 @@ type Conn struct {
 // NewConn creates a TURN connection over the net.Conn with specified configuration.
 // It starts reading goroutine
 func NewConn(inner net.Conn, config *Config) *Conn {
-	m := mux.NewTransport(inner)
+	m := mux.NewConn(inner)
 	c := NewConnMux(m, config)
 	go m.Serve()
 	return c
@@ -47,7 +47,7 @@ func NewConnStun(m *stun.Transport, config *Config) *Conn {
 	return c
 }
 
-func NewConnMux(m mux.Transport, config *Config) *Conn {
+func NewConnMux(m mux.Conn, config *Config) *Conn {
 	c := &Conn{Conn: m, config: config}
 	m.Handle(c.ServeMux)
 	return c
