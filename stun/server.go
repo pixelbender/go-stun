@@ -1,241 +1,125 @@
 package stun
 
-/*
-type Protocol struct {
-}
+import (
+	"net"
+	"sync"
+)
 
-func NewProtocol() {
+func ListenAndServe(network, laddr string, config *Config) error {
+	srv := NewServer(config)
+	return srv.ListenAndServe(network, laddr)
 }
 
 type Server struct {
-	mux.Agent
-	config *Config
+	agent *Agent
+
+	mu    sync.RWMutex
+	conns []net.PacketConn
 }
 
 func NewServer(config *Config) *Server {
-	if config == nil {
-		config = &Config{}
-	}
-	srv := &Server{config:config}
-	srv.Receive(srv.serve)
+	srv := &Server{agent: NewAgent(config)}
+	srv.agent.Handler = srv
 	return srv
 }
 
-func (srv *Server) serve(c mux.Conn, r mux.Reader) error {
-	b := r.Bytes()
-	if len(b) < 20 {
-		return io.EOF
-	}
-	p := &Packet{}
-	err := p.Decode(r)
+func (srv *Server) ListenAndServe(network, laddr string) error {
+	c, err := net.ListenPacket(network, laddr)
 	if err != nil {
 		return err
 	}
-
-	t.mu.RLock()
-	ch := t.reqs[string(b[4:20])]
-	t.mu.RUnlock()
-	if ch == nil {
-		// Skip unknown transaction
-		n := int(be.Uint16(b[2:]))
-		r.Next(n)
-		return nil
-	}
-	p := &Packet{}
-	p.Key = t.key
-	err := p.Decode(r)
-	if err != nil {
-		return err
-	}
-	select {
-	case ch <- p:
-	default:
-	}
-	return nil
-}
-*/
-
-/*
-import (
-	"crypto/rand"
-	"crypto/tls"
-	"encoding/hex"
-	"fmt"
-	"net"
-	"time"
-)
-
-// A Handler handles a STUN message.
-type Handler interface {
-	ServeSTUN(rw ResponseWriter, r *Message)
+	srv.addConn(c)
+	defer srv.removeConn(c)
+	return srv.agent.ServePacket(c)
 }
 
-// The HandlerFunc type is an adapter to allow the use of ordinary functions as STUN handlers.
-type HandlerFunc func(rw ResponseWriter, r *Message)
+func (srv *Server) ServeSTUN(msg *Message, from Transport) {
+	if msg.Type == MethodBinding {
+		to := from
+		mapped := from.RemoteAddr()
+		ip, port := sockAddr(from.LocalAddr())
 
-// ServeSTUN calls f(rw, r).
-func (f HandlerFunc) ServeSTUN(rw ResponseWriter, r *Message) {
-	f(rw, r)
-}
-
-type ResponseWriter interface {
-	LocalAddr() net.Addr
-	RemoteAddr() net.Addr
-	// WriteResponse writes STUN response within the transaction.
-	WriteMessage(msg *Message) error
-}
-
-// Server represents a STUN server.
-type Server struct {
-	*Config
-	Realm   string
-	Handler Handler
-}
-
-func NewServer(config *Config) *Server {
-	if config == nil {
-		config = DefaultConfig
-	}
-	return &Server{Config: config}
-}
-
-// ListenAndServe listens on the network address and calls handler to serve requests.
-func (srv *Server) ListenAndServe(network, addr string) error {
-	switch network {
-	case "tcp", "tcp4", "tcp6":
-		l, err := net.Listen(network, addr)
-		if err != nil {
-			return err
+		res := &Message{
+			Type:        MethodBinding | KindResponse,
+			Transaction: msg.Transaction,
+			Attributes: []Attr{
+				Addr(AttrXorMappedAddress, mapped),
+				Addr(AttrMappedAddress, mapped),
+			},
 		}
-		return srv.Serve(l)
-	case "udp", "udp4", "udp6":
-		l, err := net.ListenPacket(network, addr)
-		if err != nil {
-			return err
+
+		srv.mu.RLock()
+		defer srv.mu.RUnlock()
+
+		if ch, ok := msg.GetInt(AttrChangeRequest); ok && ch != 0 {
+			for _, c := range srv.conns {
+				chip, chport := sockAddr(c.LocalAddr())
+				if chip.IsUnspecified() {
+					continue
+				}
+				if ch&ChangeIP != 0 {
+					if !ip.Equal(chip) {
+						to = &packetConn{c, mapped}
+						break
+					}
+				} else if ch&ChangePort != 0 {
+					if ip.Equal(chip) && port != chport {
+						to = &packetConn{c, mapped}
+						break
+					}
+				}
+			}
 		}
-		return srv.ServePacket(l)
-	}
-	return fmt.Errorf("stun: listen unsupported network %v", network)
-}
 
-// ListenAndServeTLS listens on the network address secured by TLS and calls handler to serve requests.
-func (srv *Server) ListenAndServeTLS(network, addr, certFile, keyFile string) error {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return err
-	}
-	config := &tls.Config{Certificates: []tls.Certificate{cert}}
-	l, err := net.Listen(network, addr)
-	if err != nil {
-		return err
-	}
-	l = tls.NewListener(l, config)
-	return srv.Serve(l)
-}
-
-// ServePacket receives incoming packets on the packet-oriented network listener and calls handler to serve STUN requests.
-// Multiple goroutines may invoke ServePacket on the same PacketConn simultaneously.
-func (srv *Server) ServePacket(l net.PacketConn) error {
-	enc := NewEncoder(srv.Config)
-	dec := NewDecoder(srv.Config)
-	buf := make([]byte, bufferSize)
-
-	for {
-		n, addr, err := l.ReadFrom(buf)
-		if err != nil {
-			return err
+		if len(srv.conns) < 2 {
+			srv.agent.Send(res, to)
+			return
 		}
-		msg, err := dec.Decode(buf[:n], nil)
-		rw := &packetResponseWriter{l, msg, addr, enc}
-		srv.serve(rw, msg, err)
-	}
-}
 
-// Serve accepts incoming connection on the listener and calls handler to serve STUN requests.
-// Multiple goroutines may invoke Serve on the same Listener simultaneously.
-func (srv *Server) Serve(l net.Listener) error {
-	for {
-		c, err := l.Accept()
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				time.Sleep(time.Millisecond)
+	other:
+		for _, a := range srv.conns {
+			aip, aport := sockAddr(a.LocalAddr())
+			if aip.IsUnspecified() || !ip.Equal(aip) || port == aport {
 				continue
 			}
-			return err
-		}
-		go srv.serveConn(c)
-	}
-}
-
-func (srv *Server) serveConn(conn net.Conn) error {
-	c := NewConn(conn, srv.Config)
-	defer c.Close()
-	for {
-		msg, err := c.ReadMessage()
-		if err != nil {
-			return err
-		}
-		srv.serve(&connResponseWriter{c, msg}, msg, err)
-	}
-}
-
-func (srv *Server) serve(rw ResponseWriter, r *Message, err error) error {
-	if r.IsType(TypeRequest) || r.IsType(TypeIndication) {
-		if srv.GetAuthKey != nil {
-			if !r.Attributes.Has(AttrMessageIntegrity) || !r.Attributes.Has(AttrMessageIntegrity) {
-				err = ErrUnauthorized
+			for _, b := range srv.conns {
+				bip, bport := sockAddr(b.LocalAddr())
+				if bip.IsUnspecified() || bip.Equal(ip) || aport != bport {
+					continue
+				}
+				res.Set(Addr(AttrOtherAddress, b.LocalAddr()))
+				break other
 			}
 		}
+
+		srv.agent.Send(res, to)
 	}
-	if err != nil {
-		switch err {
-		case ErrUnauthorized, ErrIncorrectFingerprint:
-			// TODO: store nonce
-			nonce := make([]byte, 8)
-			rand.Read(nonce)
-			return rw.WriteMessage(&Message{
-				Method: r.Method | TypeError,
-				Attributes: Attributes{
-					AttrErrorCode: NewError(CodeUnauthorized),
-					AttrRealm:     srv.Realm,
-					AttrNonce:     hex.EncodeToString(nonce),
-				},
-			})
-		}
-		if unk, ok := err.(ErrUnknownAttrs); ok {
-			return rw.WriteMessage(&Message{
-				Method: r.Method | TypeError,
-				Attributes: Attributes{
-					AttrErrorCode:         NewError(CodeUnknownAttribute),
-					AttrUnknownAttributes: unk,
-				},
-			})
-		}
-		// TODO: log error
-		return nil
-	}
-	if h := srv.Handler; h != nil {
-		h.ServeSTUN(rw, r)
-	} else {
-		srv.ServeSTUN(rw, r)
-	}
-	return nil
 }
 
-// ServeSTUN responds to the simple STUN binding request.
-func (srv *Server) ServeSTUN(rw ResponseWriter, r *Message) {
-	switch r.Method {
-	case MethodBinding:
-		rw.WriteMessage(&Message{
-			Method: r.Method | TypeResponse,
-			Attributes: Attributes{
-				AttrXorMappedAddress: rw.RemoteAddr(),
-				AttrMappedAddress:    rw.RemoteAddr(),
-				AttrResponseOrigin:   rw.LocalAddr(),
-				// TODO: add other address
-				// TODO: handle change request
-			},
-		})
-	}
+func (srv *Server) addConn(c net.PacketConn) {
+	srv.mu.Lock()
+	srv.conns = append(srv.conns, c)
+	srv.mu.Unlock()
 }
-*/
+
+func (srv *Server) removeConn(c net.PacketConn) {
+	srv.mu.Lock()
+	l := srv.conns
+	for i, it := range l {
+		if it == c {
+			srv.conns = append(l[:i], l[i+1:]...)
+			break
+		}
+	}
+	srv.mu.Unlock()
+}
+
+func (srv *Server) Close() error {
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+	for _, it := range srv.conns {
+		it.Close()
+	}
+	srv.conns = nil
+	return nil
+}

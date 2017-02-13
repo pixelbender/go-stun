@@ -1,4 +1,3 @@
-// Package stun provides a interface for STUN protocol.
 package stun
 
 import (
@@ -10,76 +9,114 @@ import (
 	"strings"
 )
 
-// Dial connects to the given STUN URI.
-func Dial(uri string, config *Config) (conn *Conn, err error) {
-	u, err := url.Parse(uri)
+func Discover(uri string) (net.PacketConn, net.Addr, error) {
+	conn, err := Dial(uri, nil)
 	if err != nil {
+		return nil, nil, err
+	}
+	addr, err := conn.Discover()
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	// TODO: hijack
+	return conn.Conn.(net.PacketConn), addr, nil
+}
+
+type AuthMethod func(sess *Session) error
+
+// LongTermAuthMethod returns AuthMethod for long-term credentials.
+// Key = MD5(username ":" realm ":" SASLprep(password)).
+// SASLprep is defined in RFC 4013.
+func LongTermAuthMethod(username, password string) AuthMethod {
+	return func(sess *Session) error {
+		h := md5.New()
+		h.Write([]byte(username + ":" + sess.Realm + ":" + password))
+		sess.Username = username
+		sess.Key = h.Sum(nil)
+		return nil
+	}
+}
+
+// ShotTermAuthMethod returns AuthMethod for short-term credentials.
+// Key = SASLprep(password).
+// SASLprep is defined in RFC 4013.
+func ShortTermAuthMethod(password string) AuthMethod {
+	key := []byte(password)
+	return func(sess *Session) error {
+		sess.Key = key
+		return nil
+	}
+}
+
+func Dial(uri string, config *Config) (*Conn, error) {
+	secure, network, addr, auth, err := parseURI(uri)
+	if err != nil {
+		return nil, err
+	}
+	var conn net.Conn
+	if secure {
+		conn, err = tls.Dial(network, addr, nil)
+	} else {
+		if strings.HasPrefix(network, "udp") {
+			conn, err = dialUDP(network, addr)
+		} else {
+			conn, err = dialTCP(network, addr)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if auth != nil {
+		config = config.clone()
+		config.AuthMethod = auth
+	}
+	return NewConn(conn, config), nil
+}
+
+func parseURI(uri string) (secure bool, network, addr string, auth AuthMethod, err error) {
+	var u *url.URL
+	if u, err = url.Parse(uri); err != nil {
 		return
 	}
-	var c net.Conn
-	host, port, err := net.SplitHostPort(u.Opaque)
-	if err != nil {
+	host, port, e := net.SplitHostPort(u.Opaque)
+	if e != nil {
 		host = u.Opaque
 	}
-	switch strings.ToLower(u.Scheme) {
+	if a := u.User; a != nil {
+		if password, ok := a.Password(); ok {
+			auth = LongTermAuthMethod(a.Username(), password)
+		} else {
+			auth = ShortTermAuthMethod(a.Username())
+		}
+	}
+	network = u.Query().Get("transport")
+	if network == "" {
+		network = "udp"
+	}
+	switch u.Scheme {
 	case "stun":
 		if port == "" {
 			port = "3478"
 		}
-		c, err = net.Dial("udp", net.JoinHostPort(host, port))
+		switch network {
+		case "udp", "udp4", "udp6", "tcp", "tcp4", "tcp6":
+		default:
+			err = errors.New("stun: unsupported transport: " + network)
+		}
 	case "stuns":
 		if port == "" {
 			port = "5478"
 		}
-		c, err = tls.Dial("tcp", net.JoinHostPort(host, port), nil)
+		secure = true
+		switch network {
+		case "tcp", "tcp4", "tcp6":
+		default:
+			err = errors.New("stun: unsupported transport: " + network)
+		}
 	default:
-		err = errors.New("stun: unsupported scheme: " + u.Scheme)
+		err = errors.New("stun: unsupported scheme " + u.Scheme)
 	}
-	if err != nil {
-		return
-	}
-	return NewConn(c, config), nil
-}
-
-// Discover connects to the given STUN URI and sends the STUN binding request.
-// Returns the discovered server reflexive transport address.
-func Discover(uri string) (*Addr, error) {
-	c, err := Dial(uri, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
-	return c.Discover()
-}
-
-/*
-
-// ListenAndServe listens on the network address and calls handler to serve requests.
-func ListenAndServe(network, addr string, handler Handler) error {
-	srv := &Server{Config: DefaultConfig, Handler: handler}
-	return srv.ListenAndServe(network, addr)
-}
-
-// ListenAndServeTLS listens on the network address secured by TLS and calls handler to serve requests.
-func ListenAndServeTLS(network, addr string, certFile, keyFile string, handler Handler) error {
-	srv := &Server{Config: DefaultConfig, Handler: handler}
-	return srv.ListenAndServeTLS(network, addr, certFile, keyFile)
-}
-*/
-
-type AuthMethod func(m *Message) ([]byte, error)
-
-func LongTermAuthMethod(username, password string) AuthMethod {
-	return func(m *Message) ([]byte, error) {
-		h := md5.New()
-		h.Write([]byte(username + ":" + m.GetString(AttrRealm) + ":" + password))
-		return h.Sum(nil), nil
-	}
-}
-
-func ShotTermAuthMethod(key string) AuthMethod {
-	b := []byte(key)
-	return func(m *Message) ([]byte, error) {
-		return b, nil
-	}
+	addr = net.JoinHostPort(host, port)
+	return
 }

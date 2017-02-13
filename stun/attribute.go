@@ -4,56 +4,61 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha1"
-	"encoding/binary"
-	"encoding/hex"
-	"github.com/pkg/errors"
+	"fmt"
 	"hash/crc32"
 	"net"
 	"strconv"
 )
 
-var ErrFormat = errors.New("format error")
-var ErrUnknownAttr = errors.New("unknown attribute")
-var ErrFingerprint = errors.New("fingerprint error")
+// Attribute represents a STUN attribute.
+type Attr interface {
+	Type() uint16
+	Marshal(p []byte) []byte
+	Unmarshal(b []byte) error
+}
 
-func NewAttr(typ uint16) Attr {
+// IP address family
+const (
+	IPv4 = 0x01
+	IPv6 = 0x02
+)
+
+// IP address family
+const (
+	ChangeIP   uint64 = 0x04
+	ChangePort        = 0x02
+)
+
+func newAttr(typ uint16) Attr {
 	switch typ {
-	case AttrMappedAddress, AttrXorPeerAddress, AttrXorRelayedAddress, AttrXorMappedAddress,
-		AttrAlternateServer, AttrResponseOrigin, AttrOtherAddress, AttrResponseAddress,
-		AttrSourceAddress, AttrChangedAddress, AttrReflectedFrom:
-		return &Addr{AttrType: typ}
-	case AttrChangeRequest:
-	case AttrUsername, AttrData, AttrRealm, AttrNonce, AttrAccessToken, AttrReservationToken,
-		AttrPadding, AttrSoftware, AttrPassword:
-		return &Raw{AttrType: typ}
+	case AttrMappedAddress, AttrXorPeerAddress, AttrXorRelayedAddress,
+		AttrXorMappedAddress, AttrAlternateServer, AttrResponseOrigin, AttrOtherAddress,
+		AttrResponseAddress, AttrSourceAddress, AttrChangedAddress, AttrReflectedFrom:
+		return &addr{typ: typ}
+	case AttrRequestedAddressFamily, AttrRequestedTransport:
+		return &number{typ: typ, size: 4, pad: 24}
+	case AttrChannelNumber, AttrResponsePort:
+		return &number{typ: typ, size: 4, pad: 16}
+	case AttrLifetime, AttrConnectionID, AttrCacheTimeout,
+		AttrBandwidth, AttrTimerVal,
+		AttrTransactionTransmitCounter,
+		AttrEcnCheck, AttrChangeRequest, AttrPriority:
+		return &number{typ: typ, size: 4}
+	case AttrIceControlled, AttrIceControlling:
+		return &number{typ: typ, size: 8}
+	case AttrUsername, AttrRealm, AttrNonce, AttrSoftware, AttrPassword, AttrThirdPartyAuthorization,
+		AttrData, AttrAccessToken, AttrReservationToken, AttrMobilityTicket, AttrPadding, AttrUnknownAttributes:
+		return &raw{typ: typ}
 	case AttrMessageIntegrity:
-		return &MessageIntegrity{}
+		return &integrity{}
 	case AttrErrorCode:
 		return &Error{}
-	case AttrUnknownAttributes:
-		return &UnknownAttributes{}
-	case AttrChannelNumber:
-	case AttrLifetime:
-	case AttrRequestedAddressFamily:
 	case AttrEvenPort:
-	case AttrRequestedTransport:
-	case AttrDontFragment, AttrUseCandidate, AttrIceControlled, AttrIceControlling:
-		return Flag(typ)
-	case AttrPriority:
-
-		return &Raw{AttrType: typ}
-
-	case AttrResponsePort:
-	case AttrConnectionID:
-	case AttrTransactionTransmitCounter:
-	case AttrCacheTimeout:
+		return &number{typ: typ, size: 1}
+	case AttrDontFragment, AttrUseCandidate:
+		return flag(typ)
 	case AttrFingerprint:
-		return &Fingerprint{}
-	case AttrEcnCheck:
-	case AttrThirdPartyAuthorization:
-	case AttrMobilityTicket:
-	case AttrBandwidth:
-	case AttrTimerVal:
+		return &fingerprint{}
 	}
 	return nil
 }
@@ -62,26 +67,73 @@ func AttrName(typ uint16) string {
 	if r, ok := attrNames[typ]; ok {
 		return r
 	}
-	return "UNKNOWN(0x" + strconv.FormatInt(int64(typ), 16) + ")"
+	return "0x" + strconv.FormatUint(uint64(typ), 16)
 }
 
-func ErrorText(code int) string {
-	return errorText[code]
+func Int(typ uint16, v uint64) Attr {
+	switch typ {
+	case AttrRequestedAddressFamily, AttrRequestedTransport:
+		return &number{typ, 4, 24, v}
+	case AttrChannelNumber, AttrResponsePort:
+		return &number{typ, 4, 16, v}
+	case AttrIceControlled, AttrIceControlling:
+		return &number{typ, 8, 0, v}
+	case AttrEvenPort:
+		return &number{typ, 1, 0, v}
+	default:
+		return &number{typ, 4, 0, v}
+	}
 }
 
-type Flag uint16
-
-func (attr Flag) Type() uint16 {
-	return uint16(attr)
+type number struct {
+	typ       uint16
+	size, pad uint8
+	v         uint64
 }
 
-func (Flag) Marshal(p []byte) []byte {
-	return p
+func (a *number) Type() uint16 { return a.typ }
+
+func (a *number) Marshal(p []byte) []byte {
+	r, b := grow(p, int(a.size))
+	switch a.size {
+	case 1:
+		b[0] = byte(a.v)
+	case 4:
+		be.PutUint32(b, uint32(a.v<<a.pad))
+	case 8:
+		be.PutUint64(b, a.v<<a.pad)
+	}
+	return r
 }
 
-func (Flag) Unmarshal(b []byte) error {
+func (a *number) Unmarshal(b []byte) error {
+	if len(b) < int(a.size) {
+		return errFormat
+	}
+	switch a.size {
+	case 1:
+		a.v = uint64(b[0])
+	case 4:
+		a.v = uint64(be.Uint32(b) >> a.pad)
+	case 8:
+		a.v = be.Uint64(b) >> a.pad
+	}
 	return nil
 }
+
+func (a *number) String() string {
+	return "0x" + strconv.FormatUint(a.v, 16)
+}
+
+func Flag(v uint16) Attr {
+	return flag(v)
+}
+
+type flag uint16
+
+func (attr flag) Type() uint16        { return uint16(attr) }
+func (flag) Marshal(p []byte) []byte  { return p }
+func (flag) Unmarshal(b []byte) error { return nil }
 
 // Error represents the ERROR-CODE attribute.
 type Error struct {
@@ -93,9 +145,7 @@ func NewError(code int) *Error {
 	return &Error{code, ErrorText(code)}
 }
 
-func (*Error) Type() uint16 {
-	return AttrErrorCode
-}
+func (*Error) Type() uint16 { return AttrErrorCode }
 
 func (e *Error) Marshal(p []byte) []byte {
 	r, b := grow(p, 4+len(e.Reason))
@@ -109,90 +159,78 @@ func (e *Error) Marshal(p []byte) []byte {
 
 func (e *Error) Unmarshal(b []byte) error {
 	if len(b) < 4 {
-		return ErrFormat
+		return errFormat
 	}
 	e.Code = int(b[2])*100 + int(b[3])
-	e.Reason = string(b[4:])
+	e.Reason = getString(b[4:])
 	return nil
 }
 
-func (e *Error) Error() string {
-	return e.Reason
-}
+func (e *Error) Error() string  { return e.String() }
+func (e *Error) String() string { return fmt.Sprintf("%d %s", e.Code, e.Reason) }
 
-func (e *Error) String() string {
-	return e.Reason
-}
+// ErrorText returns a text for the STUN error code. It returns the empty string if the code is unknown.
+func ErrorText(code int) string { return errorText[code] }
 
-// Raw contains raw attribute data.
-type Raw struct {
-	AttrType uint16
-	Data     []byte
-}
-
-func (attr *Raw) Type() uint16 {
-	return attr.AttrType
-}
-
-func (attr *Raw) Marshal(p []byte) []byte {
-	return append(p, attr.Data...)
-}
-
-func (attr *Raw) Unmarshal(p []byte) error {
-	attr.Data = p
-	return nil
-}
-
-func (attr *Raw) String() string {
-	return string(attr.Data)
-}
-
-// StringAttr represents a string attribute.
-type String struct {
-	AttrType uint16
-	Data     string
-}
-
-func (attr *String) Type() uint16 {
-	return attr.AttrType
-}
-
-func (attr *String) Marshal(p []byte) []byte {
-	return append(p, attr.Data...)
-}
-
-func (attr *String) Unmarshal(p []byte) error {
-	attr.Data = string(p)
-	return nil
-}
-
-func (attr *String) String() string {
-	return attr.Data
-}
-
-// Addr represents an address attribute.
-type Addr struct {
-	AttrType uint16
-	IP       net.IP
-	Port     int
-}
-
-func NewAddr(typ uint16, addr net.Addr) (*Addr, error) {
-	switch a := addr.(type) {
-	case *net.UDPAddr:
-		return &Addr{typ, a.IP, a.Port}, nil
-	case *net.TCPAddr:
-		return &Addr{typ, a.IP, a.Port}, nil
+func getString(b []byte) string {
+	for i := len(b); i >= 0; i-- {
+		if b[i-1] > 0 {
+			return string(b[:i])
+		}
 	}
-	return nil, errors.New("stun: unsupported address type")
+	return ""
 }
 
-func (addr *Addr) Type() uint16 {
-	return addr.AttrType
+func Addr(typ uint16, v net.Addr) Attr {
+	ip, port := sockAddr(v)
+	return &addr{typ, ip, port}
 }
 
-func (addr *Addr) Xored() bool {
-	switch addr.AttrType {
+func sockAddr(v net.Addr) (net.IP, int) {
+	switch a := v.(type) {
+	case *net.UDPAddr:
+		return a.IP, a.Port
+	case *net.TCPAddr:
+		return a.IP, a.Port
+	case *net.IPAddr:
+		return a.IP, 0
+	default:
+		return net.IPv4zero, 0
+	}
+}
+
+func sameAddr(a, b net.Addr) bool {
+	aip, aport := sockAddr(a)
+	bip, bport := sockAddr(b)
+	return aip.Equal(bip) && aport == bport
+}
+
+func newAddr(network string, ip net.IP, port int) net.Addr {
+	switch network {
+	case "udp", "udp4", "udp6":
+		return &net.UDPAddr{IP: ip, Port: port}
+	case "tcp", "tcp4", "tcp6":
+		return &net.TCPAddr{IP: ip, Port: port}
+	}
+	return &net.IPAddr{IP: ip}
+}
+
+func IP(typ uint16, ip net.IP) Attr { return &addr{typ, ip, 0} }
+
+type addr struct {
+	typ  uint16
+	IP   net.IP
+	Port int
+}
+
+func (addr *addr) Type() uint16 { return addr.typ }
+
+func (addr *addr) Addr(network string) net.Addr {
+	return newAddr(network, addr.IP, addr.Port)
+}
+
+func (addr *addr) Xored() bool {
+	switch addr.typ {
 	case AttrXorMappedAddress, AttrXorPeerAddress, AttrXorRelayedAddress:
 		return true
 	default:
@@ -200,19 +238,19 @@ func (addr *Addr) Xored() bool {
 	}
 }
 
-func (addr *Addr) Marshal(p []byte) []byte {
-	return addr.MarshalAddress(p, nil)
+func (addr *addr) Marshal(p []byte) []byte {
+	return addr.MarshalAddr(p, nil)
 }
 
-func (addr *Addr) MarshalAddress(p []byte, tx []byte) []byte {
-	fam, ip := 1, addr.IP.To4()
+func (addr *addr) MarshalAddr(p, tx []byte) []byte {
+	fam, ip := IPv4, addr.IP.To4()
 	if ip == nil {
-		fam, ip = 2, addr.IP
+		fam, ip = IPv6, addr.IP
 	}
 	r, b := grow(p, 4+len(ip))
 	b[0] = 0
 	b[1] = byte(fam)
-	if tx != nil && addr.Xored() {
+	if addr.Xored() && tx != nil {
 		be.PutUint16(b[2:], uint16(addr.Port)^0x2112)
 		b = b[4:]
 		for i, it := range ip {
@@ -225,23 +263,23 @@ func (addr *Addr) MarshalAddress(p []byte, tx []byte) []byte {
 	return r
 }
 
-func (addr *Addr) Unmarshal(b []byte) error {
-	return addr.UnmarshalAddress(b, nil)
+func (addr *addr) Unmarshal(b []byte) error {
+	return addr.UnmarshalAddr(b, nil)
 }
 
-func (addr *Addr) UnmarshalAddress(b []byte, tx []byte) error {
+func (addr *addr) UnmarshalAddr(b, tx []byte) error {
 	if len(b) < 4 {
-		return ErrFormat
+		return errFormat
 	}
 	n, port := net.IPv4len, int(be.Uint16(b[2:]))
-	if b[1] == 2 {
+	if b[1] == IPv6 {
 		n = net.IPv6len
 	}
 	if b = b[4:]; len(b) < n {
-		return ErrFormat
+		return errFormat
 	}
 	addr.IP = make(net.IP, n)
-	if tx != nil && addr.Xored() {
+	if addr.Xored() && tx != nil {
 		for i, it := range b {
 			addr.IP[i] = it ^ tx[i]
 		}
@@ -253,78 +291,91 @@ func (addr *Addr) UnmarshalAddress(b []byte, tx []byte) error {
 	return nil
 }
 
-func (addr *Addr) String() string {
+func (addr *addr) Equal(a *addr) bool {
+	return addr == a || (addr != nil && a != nil && addr.IP.Equal(a.IP) && addr.Port == a.Port)
+}
+
+func (addr *addr) String() string {
+	if addr.Port == 0 {
+		return addr.IP.String()
+	}
 	return net.JoinHostPort(addr.IP.String(), strconv.Itoa(addr.Port))
 }
 
-// UnknownAttributes represents the UNKNOWN-ATTRIBUTES attribute.
-type UnknownAttributes struct {
-	Attributes []uint16
+func Bytes(typ uint16, v []byte) Attr { return &raw{typ, v} }
+
+type raw struct {
+	typ  uint16
+	data []byte
 }
 
-func (*UnknownAttributes) Type() uint16 {
-	return AttrUnknownAttributes
-}
-
-func (attr *UnknownAttributes) Marshal(p []byte) []byte {
-	r, b := grow(p, len(attr.Attributes)<<1)
-	for i, it := range attr.Attributes {
-		be.PutUint16(b[i<<1:], it)
-	}
-	return r
-}
-
-func (attr *UnknownAttributes) Unmarshal(b []byte) error {
-	u := make([]uint16, 0, len(b)>>1)
-	for len(b) > 2 {
-		u = append(u, be.Uint16(b))
-		b = b[2:]
-	}
-	attr.Attributes = u
+func (attr *raw) Type() uint16            { return attr.typ }
+func (attr *raw) Marshal(p []byte) []byte { return append(p, attr.data...) }
+func (attr *raw) Unmarshal(p []byte) error {
+	attr.data = p
 	return nil
 }
+func (attr *raw) String() string { return string(attr.data) }
 
-func NewMessageIntegrity(key []byte) *MessageIntegrity {
-	return &MessageIntegrity{key: key}
+func String(typ uint16, v string) Attr {
+	return &str{typ, v}
 }
 
-type MessageIntegrity struct {
+type str struct {
+	typ  uint16
+	data string
+}
+
+func (attr *str) Type() uint16            { return attr.typ }
+func (attr *str) Marshal(p []byte) []byte { return append(p, attr.data...) }
+func (attr *str) Unmarshal(p []byte) error {
+	attr.data = string(p)
+	return nil
+}
+func (attr *str) String() string { return attr.data }
+
+func MessageIntegrity(key []byte) Attr {
+	return &integrity{key: key}
+}
+
+type integrity struct {
 	key, sum, raw []byte
 }
 
-func (*MessageIntegrity) Type() uint16 {
+func (*integrity) Type() uint16 {
 	return AttrMessageIntegrity
 }
 
-func (attr *MessageIntegrity) Marshal(p []byte) []byte {
+func (attr *integrity) Marshal(p []byte) []byte {
 	return append(p, attr.sum...)
 }
 
-func (attr *MessageIntegrity) Unmarshal(b []byte) error {
+func (attr *integrity) Unmarshal(b []byte) error {
 	if len(b) < 20 {
-		return ErrFormat
+		return errFormat
 	}
 	attr.sum = b
 	return nil
 }
 
-func (attr *MessageIntegrity) MarshalSum(p []byte, pos int) []byte {
-	be.PutUint16(p[pos+2:], uint16(len(p)+20))
-	return attr.Sum(attr.key, p[pos:len(p)-4], p)
+func (attr *integrity) MarshalSum(p, raw []byte) []byte {
+	n := len(raw) - 4
+	be.PutUint16(raw[2:], uint16(n))
+	return attr.Sum(attr.key, raw[:n], p)
 }
 
-func (attr *MessageIntegrity) UnmarshalSum(p, raw []byte) error {
+func (attr *integrity) UnmarshalSum(p, raw []byte) error {
 	attr.raw = raw
 	return attr.Unmarshal(p)
 }
 
-func (attr *MessageIntegrity) Sum(key, data, p []byte) []byte {
+func (attr *integrity) Sum(key, data, p []byte) []byte {
 	h := hmac.New(sha1.New, key)
 	h.Write(data)
 	return h.Sum(p)
 }
 
-func (attr *MessageIntegrity) Check(key []byte) bool {
+func (attr *integrity) Check(key []byte) bool {
 	r := attr.raw
 	if len(r) < 44 {
 		return r == nil
@@ -334,87 +385,54 @@ func (attr *MessageIntegrity) Check(key []byte) bool {
 	return bytes.Equal(h, attr.sum)
 }
 
-func (attr *MessageIntegrity) String() string {
-	return hex.EncodeToString(attr.sum)
-}
+var Fingerprint Attr = &fingerprint{}
 
-var DefaultFingerprint *Fingerprint
-
-type Fingerprint struct {
+type fingerprint struct {
 	sum uint32
 	raw []byte
 }
 
-func (*Fingerprint) Type() uint16 {
+func (*fingerprint) Type() uint16 {
 	return AttrFingerprint
 }
 
-func (attr *Fingerprint) Marshal(p []byte) []byte {
+func (attr *fingerprint) Marshal(p []byte) []byte {
 	r, b := grow(p, 4)
 	be.PutUint32(b, attr.sum)
 	return r
 }
 
-func (attr *Fingerprint) Unmarshal(b []byte) error {
+func (attr *fingerprint) Unmarshal(b []byte) error {
 	if len(b) < 4 {
-		return ErrFormat
+		return errFormat
 	}
 	attr.sum = be.Uint32(b)
 	return nil
 }
 
-func (attr *Fingerprint) MarshalSum(p []byte, pos int) []byte {
-	be.PutUint16(p[pos+2:], uint16(len(p)+4))
-	v := attr.Sum(p[pos : len(p)-4])
+func (attr *fingerprint) MarshalSum(p, raw []byte) []byte {
+	n := len(raw) - 4
+	be.PutUint16(raw[2:], uint16(n-16))
+	v := attr.Sum(raw[:n])
 	r, b := grow(p, 4)
 	be.PutUint32(b, v)
 	return r
 }
 
-func (attr *Fingerprint) UnmarshalSum(p, raw []byte) error {
+func (attr *fingerprint) UnmarshalSum(p, raw []byte) error {
 	attr.raw = raw
 	return attr.Unmarshal(p)
 }
 
-func (attr *Fingerprint) Sum(p []byte) uint32 {
+func (attr *fingerprint) Sum(p []byte) uint32 {
 	return crc32.ChecksumIEEE(p) ^ 0x5354554e
 }
 
-func (attr *Fingerprint) Check() bool {
+func (attr *fingerprint) Check() bool {
 	r := attr.raw
 	if len(r) < 28 {
 		return r == nil
 	}
 	be.PutUint16(r[2:], uint16(len(r)-20))
 	return attr.Sum(r[:len(r)-8]) == attr.sum
-}
-
-func (attr *Fingerprint) String() string {
-	return "0x" + strconv.FormatInt(int64(attr.sum), 16)
-}
-
-func grow(p []byte, n int) (b, a []byte) {
-	l := len(p)
-	r := l + n
-	if r > cap(p) {
-		b = make([]byte, (1+((r-1)>>10))<<10)[:r]
-		a = b[l:r]
-		if l > 0 {
-			copy(b, p[:l])
-		}
-	} else {
-		return p[:r], p[l:r]
-	}
-	return
-}
-
-var be = binary.BigEndian
-
-type errAttribute struct {
-	error
-	AttrType uint16
-}
-
-func (err errAttribute) Error() string {
-	return "attribute " + AttrName(err.AttrType) + ": " + err.error.Error()
 }

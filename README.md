@@ -13,8 +13,9 @@ Go implementation of STUN, TURN and ICE Protocols
 - [x] STUN Client/Server
 - [x] STUN Authorization
 - [x] STUN Transactions
-- [ ] STUN Multiplexing
+- [x] STUN Multiplexing
 - [ ] STUN Redirection
+- [ ] NAT Behavior Discovery
 - [x] ICE Messages
 - [ ] ICE Agent
 - [ ] ICE Gathering
@@ -41,12 +42,13 @@ import (
 )
 
 func main() {
-	addr, err := stun.Discover("stun:stun.l.google.com:19302")
+    conn, addr, err := stun.Discover("stun:stun.l.google.com:19302")
 	if err != nil {
-		fmt.Println(err)
-	} else {
-		fmt.Println(addr)
-	}
+    	fmt.Println(err)
+    	return
+    }
+    defer conn.Close()
+	fmt.Printf("Local address: %v, Server reflexive address: %v", conn.LocalAddr(), addr)
 }
 ```
 
@@ -61,19 +63,20 @@ import (
 )
 
 func main() {
-	conn, err := turn.Allocate("turn:example.org", "username", "password")
+	conn, err := turn.Allocate("turn:example.org", stun.LongTermAuthMethod("username", "password"))
 	if err != nil {
 		fmt.Println(err)
-	} else {
-	    defer conn.Close()
-		fmt.Println(conn.RelayedAddr())
+		return
 	}
+	defer conn.Close()
+	fmt.Printf("Local address: %v, Relayed transport address: %v", conn.LocalAddr(), conn.RelayedAddr())
 }
 ```
 
 ## Specifications
 
 - [RFC 5389: STUN](https://tools.ietf.org/html/rfc5389)
+- [RFC 5780: NAT Behavior Discovery Using STUN](https://tools.ietf.org/html/rfc5780)
 - [RFC 7064: URI Scheme for STUN](https://tools.ietf.org/html/rfc7064)
 - [RFC 5766: TURN: Relay Extensions to STUN](https://tools.ietf.org/html/rfc5766)
 - [RFC 5245: ICE: A Protocol for NAT for Offer/Answer Protocols](https://tools.ietf.org/html/rfc5245)

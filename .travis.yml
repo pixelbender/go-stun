@@ -7,10 +7,6 @@ before_install:
   - go get golang.org/x/tools/cmd/cover
   - go get github.com/golang/lint/golint
 script:
-  - go test -v -coverprofile=mux.coverprofile ./mux
-  - go test -v -coverprofile=stun.coverprofile ./stun
-  - go test -v -coverprofile=turn.coverprofile ./turn
-  - go test -v -coverprofile=ice.coverprofile ./ice
+  - go test -v -race -coverprofile=stun.coverprofile ./stun
   - 'echo "mode: set" > .coverage && grep -h -v "mode: set" *.coverprofile >> .coverage'
   - $HOME/gopath/bin/goveralls -coverprofile=.coverage -service=travis-ci
-  - $HOME/gopath/bin/golint ./...

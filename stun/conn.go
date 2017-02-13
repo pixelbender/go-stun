@@ -1,143 +1,110 @@
 package stun
 
 import (
-	"bytes"
-	"errors"
-	"github.com/pixelbender/go-stun/mux"
-	"io"
-	"math/rand"
+	"github.com/pkg/errors"
 	"net"
-	"time"
 )
 
-var ErrTimeout = errors.New("stun: transaction timeout")
-var ErrBadResponse = errors.New("stun: bad response")
-
-type Config struct {
-	// GetAuthKey returns a key for a MESSAGE-INTEGRITY attribute generation and validation.
-	// Key = MD5(username ":" realm ":" SASLprep(password)) for long-term credentials.
-	// Key = SASLprep(password) for short-term credentials.
-	// SASLprep is defined in RFC 4013.
-	GetAuthKey func(m *Message) ([]byte, error)
-
-	// Retransmission timeout, default is 500ms
-	RetransmissionTimeout time.Duration
-
-	// Transaction timeout, default is 39.5 seconds
-	TransactionTimeout time.Duration
-
-	AdditionalAttributes []Attr
-}
-
-func (c *Config) getRetransmissionTimeout() time.Duration {
-	if c != nil && c.RetransmissionTimeout > 0 {
-		return c.RetransmissionTimeout
-	}
-	return 500 * time.Millisecond
-}
-
-func (c *Config) getTransactionTimeout() time.Duration {
-	if c != nil && c.TransactionTimeout > 0 {
-		return c.TransactionTimeout
-	}
-	return 39500 * time.Millisecond
-}
-
-func (c *Config) setAttributes(m *Message) {
-	if c != nil {
-		m.Attributes = append(m.Attributes, c.AdditionalAttributes...)
-	}
-}
-
 type Conn struct {
-	mux.Conn
-	config *Config
+	net.Conn
+	agent *Agent
+	sess  *Session
 }
 
-func NewConn(inner net.Conn, config *Config) *Conn {
-	return &Conn{mux.NewConn(inner, &mux.Mux{}), config}
+func NewConn(conn net.Conn, config *Config) *Conn {
+	a := NewAgent(config)
+	go a.ServeConn(conn)
+	return &Conn{conn, a, nil}
 }
 
-func (c *Conn) Discover() (*Addr, error) {
-	res, err := c.RoundTrip(&Message{Type: MethodBinding})
+func (c *Conn) Network() string {
+	return c.LocalAddr().Network()
+}
+
+func (c *Conn) Discover() (net.Addr, error) {
+	res, err := c.Request(&Message{Type: MethodBinding})
 	if err != nil {
 		return nil, err
 	}
-	if err := res.GetError(); err != nil {
-		return nil, err
+	mapped := res.GetAddr(c.Network(), AttrXorMappedAddress, AttrMappedAddress)
+	if mapped != nil {
+		return mapped, nil
 	}
-	for _, typ := range []uint16{AttrXorMappedAddress, AttrMappedAddress} {
-		if addr, ok := res.Get(typ).(*Addr); ok {
-			return addr, nil
-		}
-	}
-	return nil, ErrBadResponse
+	return nil, errors.New("stun: bad response, no mapped address")
 }
 
-func (c *Conn) RoundTrip(req *Message) (*Message, error) {
-	var rto time.Duration
-	if !c.Reliable() {
-		rto = c.config.getRetransmissionTimeout()
+func (c *Conn) Request(req *Message) (res *Message, err error) {
+	res, _, err = c.RequestTransport(req, c.Conn)
+	return
+}
+
+func (c *Conn) RequestTransport(req *Message, to Transport) (res *Message, from Transport, err error) {
+	sess := c.sess
+	auth := c.agent.config.AuthMethod
+	if to == nil {
+		to = c.Conn
 	}
-	deadline := time.Now().Add(c.config.getTransactionTimeout())
-
-	c.config.setAttributes(req)
-	tx := newTransaction(req)
-
-	for time.Now().Before(deadline) {
-		if err := c.Send(tx.Marshal); err != nil {
-			return nil, err
+	for {
+		msg := &Message{
+			req.Type,
+			newTransaction(),
+			append(sess.attrs(), req.Attributes...),
 		}
-		timeout := deadline.Sub(time.Now())
-		if timeout <= 0 {
-			break
-		} else if 0 < rto && rto < timeout {
-			timeout = rto
+		res, from, err = c.agent.RoundTrip(msg, to)
+		if err != nil {
+			return
 		}
-		err := c.Receive(tx.Handle, timeout)
-		switch err {
-		case mux.ErrTimeout:
-			rto <<= 1
-		case nil:
-			return tx.res, nil
+		code := res.GetError()
+		if code == nil {
+			// FIXME: authorize response...
+			if sess != nil {
+				c.sess = sess
+			}
+			return
+		}
+		err = code
+		switch code.Code {
+		case CodeUnauthorized, CodeStaleNonce:
+			if auth == nil {
+				return
+			}
+			sess = &Session{
+				Realm: res.GetString(AttrRealm),
+				Nonce: res.GetString(AttrNonce),
+			}
+			if err = auth(sess); err != nil {
+				return
+			}
+			auth = nil
 		default:
-			return nil, err
+			return
 		}
 	}
-	return nil, ErrTimeout
 }
 
-type transaction struct {
-	*Message
-	res *Message
+type Session struct {
+	Realm    string
+	Nonce    string
+	Username string
+	Key      []byte
 }
 
-func newTransaction(req *Message) *transaction {
-	b := make([]byte, 16)
-	copy(b, magicCookie)
-	random.Read(b[4:])
-
-	req.Transaction = b
-	return &transaction{req, &Message{}}
-}
-
-func (tx *transaction) Write(b []byte) []byte {
-	return tx.Marshal(b)
-}
-
-func (tx *transaction) Handle(b []byte) (int, error) {
-	if len(b) < 20 {
-		return 0, io.EOF
+func (s *Session) attrs() []Attr {
+	if s == nil {
+		return nil
 	}
-	if !bytes.Equal(b[4:20], tx.Transaction) {
-		return 0, io.EOF
+	var a []Attr
+	if s.Realm != "" {
+		a = append(a, String(AttrRealm, s.Realm))
 	}
-	n := int(be.Uint16(b[2:])) + 20
-	if len(b) < n {
-		return 0, io.EOF
+	if s.Nonce != "" {
+		a = append(a, String(AttrNonce, s.Nonce))
 	}
-	return n, tx.res.Unmarshal(b[:n])
+	if s.Username != "" {
+		a = append(a, String(AttrUsername, s.Username))
+	}
+	if s.Key != nil {
+		a = append(a, MessageIntegrity(s.Key))
+	}
+	return a
 }
-
-var magicCookie = []byte{0x21, 0x12, 0xa4, 0x42}
-var random = rand.New(rand.NewSource(time.Now().Unix()))
