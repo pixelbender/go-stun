@@ -7,6 +7,6 @@ before_install:
   - go get golang.org/x/tools/cmd/cover
   - go get github.com/golang/lint/golint
 script:
-  - go test -v -race -coverprofile=stun.coverprofile ./stun
-  - 'echo "mode: set" > .coverage && grep -h -v "mode: set" *.coverprofile >> .coverage'
+  - go test -v -race -covermode=atomic -coverprofile=stun.coverprofile ./stun
+  - 'echo "mode: atomic" > .coverage && grep -h -v "mode: atomic" *.coverprofile >> .coverage'
   - $HOME/gopath/bin/goveralls -coverprofile=.coverage -service=travis-ci
