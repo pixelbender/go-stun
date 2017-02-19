@@ -63,7 +63,7 @@ import (
 )
 
 func main() {
-	conn, err := turn.Allocate("turn:example.org", stun.LongTermAuthMethod("username", "password"))
+	conn, err := turn.Allocate("turn:username:password@example.org")
 	if err != nil {
 		fmt.Println(err)
 		return
