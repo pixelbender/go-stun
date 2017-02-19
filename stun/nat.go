@@ -42,8 +42,8 @@ func (d *Detector) DiscoverChange(change uint64) error {
 	if err != nil {
 		return err
 	}
-	ip, port := sockAddr(d.RemoteAddr())
-	chip, chport := sockAddr(from.RemoteAddr())
+	ip, port := SockAddr(d.RemoteAddr())
+	chip, chport := SockAddr(from.RemoteAddr())
 	if change&ChangeIP != 0 {
 		if ip.Equal(chip) {
 			return errors.New("stun: bad response, ip address is not changed")
@@ -113,7 +113,7 @@ func (d *Detector) Mapping() (string, error) {
 	if other == nil {
 		return "", errors.New("stun: bad response, no other address")
 	}
-	ip, _ := sockAddr(mapped)
+	ip, _ := SockAddr(mapped)
 	if ip.IsLoopback() {
 		return EndpointIndependent, nil
 	}
@@ -122,9 +122,9 @@ func (d *Detector) Mapping() (string, error) {
 			return EndpointIndependent, nil
 		}
 	}
-	ip, _ = sockAddr(other)
-	_, port := sockAddr(d.RemoteAddr())
-	a, err := d.DiscoverOther(newAddr(n, ip, port))
+	ip, _ = SockAddr(other)
+	_, port := SockAddr(d.RemoteAddr())
+	a, err := d.DiscoverOther(NewAddr(n, ip, port))
 	if err != nil {
 		return "", err
 	}
@@ -139,6 +139,10 @@ func (d *Detector) Mapping() (string, error) {
 		return AddressDependent, nil
 	}
 	return AddressPortDependent, nil
+}
+
+func LocalAddrs() []*net.IPAddr {
+	return local
 }
 
 var local []*net.IPAddr

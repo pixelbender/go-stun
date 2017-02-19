@@ -47,7 +47,7 @@ func (c *Conn) RequestTransport(req *Message, to Transport) (res *Message, from 
 	for {
 		msg := &Message{
 			req.Type,
-			newTransaction(),
+			NewTransaction(),
 			append(sess.attrs(), req.Attributes...),
 		}
 		res, from, err = c.agent.RoundTrip(msg, to)

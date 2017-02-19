@@ -68,7 +68,7 @@ func Dial(uri string, config *Config) (*Conn, error) {
 		return nil, err
 	}
 	if auth != nil {
-		config = config.clone()
+		config = config.Clone()
 		config.AuthMethod = auth
 	}
 	return NewConn(conn, config), nil
@@ -95,7 +95,7 @@ func parseURI(uri string) (secure bool, network, addr string, auth AuthMethod, e
 		network = "udp"
 	}
 	switch u.Scheme {
-	case "stun":
+	case "stun", "turn":
 		if port == "" {
 			port = "3478"
 		}
@@ -104,7 +104,7 @@ func parseURI(uri string) (secure bool, network, addr string, auth AuthMethod, e
 		default:
 			err = errors.New("stun: unsupported transport: " + network)
 		}
-	case "stuns":
+	case "stuns", "turns":
 		if port == "" {
 			port = "5478"
 		}

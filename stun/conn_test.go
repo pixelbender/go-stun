@@ -2,11 +2,15 @@ package stun
 
 import (
 	"testing"
+	"time"
 )
 
 func TestDiscover(t *testing.T) {
+	config := DefaultConfig
+	config.RetransmissionTimeout = 300 * time.Millisecond
+	config.TransactionTimeout = time.Second
 	if testing.Verbose() {
-		DefaultConfig.Logf = t.Logf
+		config.Logf = t.Logf
 	} else {
 		t.Parallel()
 	}

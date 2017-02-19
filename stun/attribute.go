@@ -182,11 +182,11 @@ func getString(b []byte) string {
 }
 
 func Addr(typ uint16, v net.Addr) Attr {
-	ip, port := sockAddr(v)
+	ip, port := SockAddr(v)
 	return &addr{typ, ip, port}
 }
 
-func sockAddr(v net.Addr) (net.IP, int) {
+func SockAddr(v net.Addr) (net.IP, int) {
 	switch a := v.(type) {
 	case *net.UDPAddr:
 		return a.IP, a.Port
@@ -200,12 +200,12 @@ func sockAddr(v net.Addr) (net.IP, int) {
 }
 
 func sameAddr(a, b net.Addr) bool {
-	aip, aport := sockAddr(a)
-	bip, bport := sockAddr(b)
+	aip, aport := SockAddr(a)
+	bip, bport := SockAddr(b)
 	return aip.Equal(bip) && aport == bport
 }
 
-func newAddr(network string, ip net.IP, port int) net.Addr {
+func NewAddr(network string, ip net.IP, port int) net.Addr {
 	switch network {
 	case "udp", "udp4", "udp6":
 		return &net.UDPAddr{IP: ip, Port: port}
@@ -226,7 +226,7 @@ type addr struct {
 func (addr *addr) Type() uint16 { return addr.typ }
 
 func (addr *addr) Addr(network string) net.Addr {
-	return newAddr(network, addr.IP, addr.Port)
+	return NewAddr(network, addr.IP, addr.Port)
 }
 
 func (addr *addr) Xored() bool {
@@ -360,7 +360,7 @@ func (attr *integrity) Unmarshal(b []byte) error {
 
 func (attr *integrity) MarshalSum(p, raw []byte) []byte {
 	n := len(raw) - 4
-	be.PutUint16(raw[2:], uint16(n))
+	be.PutUint16(raw[2:], uint16(n+4))
 	return attr.Sum(attr.key, raw[:n], p)
 }
 
@@ -412,7 +412,7 @@ func (attr *fingerprint) Unmarshal(b []byte) error {
 
 func (attr *fingerprint) MarshalSum(p, raw []byte) []byte {
 	n := len(raw) - 4
-	be.PutUint16(raw[2:], uint16(n-16))
+	be.PutUint16(raw[2:], uint16(n-12))
 	v := attr.Sum(raw[:n])
 	r, b := grow(p, 4)
 	be.PutUint32(b, v)

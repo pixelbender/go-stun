@@ -37,7 +37,7 @@ func (srv *Server) ServeSTUN(msg *Message, from Transport) {
 	if msg.Type == MethodBinding {
 		to := from
 		mapped := from.RemoteAddr()
-		ip, port := sockAddr(from.LocalAddr())
+		ip, port := SockAddr(from.LocalAddr())
 
 		res := &Message{
 			Type:        MethodBinding | KindResponse,
@@ -53,7 +53,7 @@ func (srv *Server) ServeSTUN(msg *Message, from Transport) {
 
 		if ch, ok := msg.GetInt(AttrChangeRequest); ok && ch != 0 {
 			for _, c := range srv.conns {
-				chip, chport := sockAddr(c.LocalAddr())
+				chip, chport := SockAddr(c.LocalAddr())
 				if chip.IsUnspecified() {
 					continue
 				}
@@ -78,12 +78,12 @@ func (srv *Server) ServeSTUN(msg *Message, from Transport) {
 
 	other:
 		for _, a := range srv.conns {
-			aip, aport := sockAddr(a.LocalAddr())
+			aip, aport := SockAddr(a.LocalAddr())
 			if aip.IsUnspecified() || !ip.Equal(aip) || port == aport {
 				continue
 			}
 			for _, b := range srv.conns {
-				bip, bport := sockAddr(b.LocalAddr())
+				bip, bport := SockAddr(b.LocalAddr())
 				if bip.IsUnspecified() || bip.Equal(ip) || aport != bport {
 					continue
 				}

@@ -235,8 +235,18 @@ func (m *Message) CheckIntegrity(key []byte) bool {
 	return false
 }
 
+func (m *Message) CheckFingerprint() bool {
+	if attr, ok := m.Get(AttrFingerprint).(*fingerprint); ok {
+		return attr.Check()
+	}
+	return false
+}
+
 func (m *Message) String() string {
 	sort.Sort(byPosition(m.Attributes))
+
+	// TODO: use sprintf
+
 	b := &bytes.Buffer{}
 	b.WriteString(MethodName(m.Type))
 	b.WriteByte('{')
@@ -306,7 +316,7 @@ func (d dict) rand(n int) string {
 	return string(b)
 }
 
-func newTransaction() []byte {
+func NewTransaction() []byte {
 	id := make([]byte, 16)
 	copy(id, magicCookie)
 	rand.Read(id[4:]) // TODO: configure random source

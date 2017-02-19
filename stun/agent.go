@@ -2,10 +2,10 @@ package stun
 
 import (
 	"errors"
+	"math/rand"
 	"net"
 	"sync"
 	"time"
-	"math/rand"
 )
 
 var DefaultConfig = &Config{
@@ -53,7 +53,7 @@ func (c *Config) attrs() []Attr {
 	return a
 }
 
-func (c *Config) clone() *Config {
+func (c *Config) Clone() *Config {
 	r := *c
 	return &r
 }
@@ -211,7 +211,7 @@ func (m *mux) serve(msg *Message, tr Transport) bool {
 }
 
 func (m *mux) newTx() *transaction {
-	tx := &transaction{id: newTransaction()}
+	tx := &transaction{id: NewTransaction()}
 	m.Lock()
 	if m.t == nil {
 		m.t = make(map[string]*transaction)

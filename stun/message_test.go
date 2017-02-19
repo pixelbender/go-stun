@@ -62,6 +62,31 @@ func BenchmarkBuffer(b *testing.B) {
 	}
 }
 
+func TestIntegrity(t *testing.T) {
+	key := []byte("VOkJxbRl1RmTxUk/WvJxBt")
+	for _, it := range samples[:3] {
+		d, err := hex.DecodeString(it)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := UnmarshalMessage(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Set(MessageIntegrity(key))
+		m, err = UnmarshalMessage(m.Marshal(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !m.CheckIntegrity(key) {
+			t.Error("integrity check failed")
+		}
+		if !m.CheckFingerprint() {
+			t.Error("fingerprint check failed")
+		}
+	}
+}
+
 func TestVectorsSampleRequest(t *testing.T) {
 	b, err := hex.DecodeString(samples[0])
 	if err != nil {
@@ -74,6 +99,9 @@ func TestVectorsSampleRequest(t *testing.T) {
 	t.Log("message", m)
 	if !m.CheckIntegrity([]byte("VOkJxbRl1RmTxUk/WvJxBt")) {
 		t.Error("integrity check failed")
+	}
+	if !m.CheckFingerprint() {
+		t.Error("fingerprint check failed")
 	}
 	if m.Kind() != KindRequest || m.Method() != MethodBinding {
 		t.Error("wrong message type:", m.Type)
@@ -99,6 +127,9 @@ func TestVectorsSampleIPv4Response(t *testing.T) {
 	if !m.CheckIntegrity([]byte("VOkJxbRl1RmTxUk/WvJxBt")) {
 		t.Error("integrity check failed")
 	}
+	if !m.CheckFingerprint() {
+		t.Error("fingerprint check failed")
+	}
 	if m.Kind() != KindResponse || m.Method() != MethodBinding {
 		t.Error("wrong message type:", m.Type)
 	}
@@ -123,6 +154,9 @@ func TestVectorsSampleIPv6Response(t *testing.T) {
 	t.Log("message", m)
 	if !m.CheckIntegrity([]byte("VOkJxbRl1RmTxUk/WvJxBt")) {
 		t.Error("integrity check failed")
+	}
+	if !m.CheckFingerprint() {
+		t.Error("fingerprint check failed")
 	}
 	if m.Kind() != KindResponse || m.Method() != MethodBinding {
 		t.Error("wrong message type:", m.Type)
