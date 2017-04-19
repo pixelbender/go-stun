@@ -2,6 +2,8 @@
 
 Go implementation of STUN, TURN and ICE Protocols
 
+[![Join the chat at https://gitter.im/pixelbender/go-stun](https://badges.gitter.im/pixelbender/go-stun.svg)](https://gitter.im/pixelbender/go-stun?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+
 [![Build Status](https://travis-ci.org/pixelbender/go-stun.svg)](https://travis-ci.org/pixelbender/go-stun)
 [![Coverage Status](https://coveralls.io/repos/github/pixelbender/go-stun/badge.svg?branch=master)](https://coveralls.io/github/pixelbender/go-stun?branch=master)
 [![Go Report Card](https://goreportcard.com/badge/github.com/pixelbender/go-stun)](https://goreportcard.com/report/github.com/pixelbender/go-stun)
