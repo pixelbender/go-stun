@@ -28,7 +28,7 @@ Go implementation of STUN, TURN and ICE Protocols
 ## Installation
 
 ```sh
-go get github.com/pixelbender/go-stun
+go get github.com/pixelbender/go-stun/...
 ```
 
 ## STUN: Server reflexive transport address discovery
