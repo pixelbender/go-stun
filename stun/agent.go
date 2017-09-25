@@ -104,6 +104,7 @@ func (a *Agent) ServeConn(c net.Conn) error {
 	for {
 		select {
 		case <-a.stopCh:
+			c.SetReadDeadline(time.Time{}) // reset read deadline
 			return nil
 		default:
 			if p >= len(b) {
@@ -143,11 +144,12 @@ func (a *Agent) Stop() {
 func (a *Agent) ServePacket(c net.PacketConn) error {
 	b := getBuffer()
 	defer putBuffer(b)
-	defer c.Close()
+	// defer c.Close()
 
 	for {
 		select {
 		case <-a.stopCh:
+			c.SetReadDeadline(time.Time{}) // reset read deadline
 			return nil
 		default:
 			c.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
