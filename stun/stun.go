@@ -19,7 +19,7 @@ func Discover(uri string) (net.PacketConn, net.Addr, error) {
 		conn.Close()
 		return nil, nil, err
 	}
-	// TODO: hijack
+	conn.agent.Stop() // stop the agent's read loop
 	return conn.Conn.(net.PacketConn), addr, nil
 }
 

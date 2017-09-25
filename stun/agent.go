@@ -62,6 +62,8 @@ type Agent struct {
 	config  *Config
 	Handler Handler
 	m       mux
+
+	stopCh chan struct{}
 }
 
 func NewAgent(config *Config) *Agent {
@@ -70,6 +72,8 @@ func NewAgent(config *Config) *Agent {
 	}
 	return &Agent{
 		config: config,
+
+		stopCh: make(chan struct{}),
 	}
 }
 
@@ -98,30 +102,42 @@ func (a *Agent) ServeConn(c net.Conn) error {
 	)
 	defer putBuffer(b)
 	for {
-		if p >= len(b) {
-			return errBufferOverflow
-		}
-		n, err := c.Read(b[p:])
-		if err != nil {
-			return err
-		}
-		p += n
-		n = 0
-		for n < p {
-			r, err := a.ServeTransport(b[n:p], c)
-			if err != nil {
+		select {
+		case <-a.stopCh:
+			return nil
+		default:
+			if p >= len(b) {
+				return errBufferOverflow
+			}
+			c.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+			n, err := c.Read(b[p:])
+			if err, ok := err.(net.Error); ok && err.Timeout() {
+				continue
+			} else if err != nil {
 				return err
 			}
-			n += r
-		}
-		if n > 0 {
-			if n < p {
-				p = copy(b, b[n:p])
-			} else {
-				p = 0
+			p += n
+			n = 0
+			for n < p {
+				r, err := a.ServeTransport(b[n:p], c)
+				if err != nil {
+					return err
+				}
+				n += r
+			}
+			if n > 0 {
+				if n < p {
+					p = copy(b, b[n:p])
+				} else {
+					p = 0
+				}
 			}
 		}
 	}
+}
+
+func (a *Agent) Stop() {
+	a.stopCh <- struct{}{}
 }
 
 func (a *Agent) ServePacket(c net.PacketConn) error {
@@ -130,12 +146,20 @@ func (a *Agent) ServePacket(c net.PacketConn) error {
 	defer c.Close()
 
 	for {
-		n, addr, err := c.ReadFrom(b)
-		if err != nil {
-			return err
-		}
-		if n > 0 {
-			a.ServeTransport(b[:n], &packetConn{c, addr})
+		select {
+		case <-a.stopCh:
+			return nil
+		default:
+			c.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+			n, addr, err := c.ReadFrom(b)
+			if err, ok := err.(net.Error); ok && err.Timeout() {
+				continue
+			} else if err != nil {
+				return err
+			}
+			if n > 0 {
+				a.ServeTransport(b[:n], &packetConn{c, addr})
+			}
 		}
 	}
 }
