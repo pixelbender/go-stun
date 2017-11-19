@@ -19,6 +19,7 @@ func DiscoverConn(stunAddr string, c *net.UDPConn) (*net.UDPAddr, error) {
 		return nil, err
 	}
 	conn := NewConn(&packetConn{c, stunUDPAddr}, nil)
+
 	addr, err := conn.Discover()
 	if err != nil {
 		conn.Close()

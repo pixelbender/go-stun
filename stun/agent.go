@@ -151,6 +151,7 @@ func (a *Agent) ServePacket(c net.PacketConn) error {
 	for {
 		select {
 		case <-a.stopCh:
+			a.m.Close()
 			c.SetReadDeadline(time.Time{}) // reset read deadline
 			return nil
 		default:
@@ -232,14 +233,17 @@ func (m *mux) serve(msg *Message, tr Transport) bool {
 	m.RUnlock()
 	if ok {
 		tx.msg, tx.from = msg, tr
-		tx.Done()
+		tx.done()
 		return true
 	}
 	return false
 }
 
 func (m *mux) newTx() *transaction {
-	tx := &transaction{id: NewTransaction()}
+	tx := &transaction{
+		doneCh: make(chan struct{}),
+		id:     NewTransaction(),
+	}
 	m.Lock()
 	if m.t == nil {
 		m.t = make(map[string]*transaction)
@@ -269,17 +273,25 @@ func (m *mux) Close() {
 }
 
 type transaction struct {
-	sync.WaitGroup
+	doneCh chan struct{}
+
 	id   []byte
 	from Transport
 	msg  *Message
 	err  error
 }
 
+func (tx *transaction) done() {
+	select {
+	case tx.doneCh <- struct{}{}:
+	default:
+		return
+	}
+}
+
 func (tx *transaction) Receive(d time.Duration) (msg *Message, from Transport, err error) {
-	tx.Add(1)
 	t := time.AfterFunc(d, tx.timeout)
-	tx.Wait()
+	<-tx.doneCh
 	t.Stop()
 	if err = tx.err; err != nil {
 		return
@@ -289,12 +301,12 @@ func (tx *transaction) Receive(d time.Duration) (msg *Message, from Transport, e
 
 func (tx *transaction) timeout() {
 	tx.err = errTimeout
-	tx.Done()
+	tx.done()
 }
 
 func (tx *transaction) Close() {
 	tx.err = errCanceled
-	tx.Done()
+	tx.done()
 }
 
 var errCanceled = errors.New("stun: transaction canceled")
