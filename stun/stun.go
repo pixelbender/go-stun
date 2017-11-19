@@ -9,6 +9,26 @@ import (
 	"strings"
 )
 
+// DiscoverConn allows discovery using an existing net.UDPConn, which is
+// temporarily hijacked to communicate with the STUN server. The net.UDPConn
+// is returned upon completion of the discovery process, or closed if an error
+// occurs.
+func DiscoverConn(stunAddr string, c *net.UDPConn) (*net.UDPAddr, error) {
+	stunUDPAddr, err := net.ResolveUDPAddr("udp", stunAddr)
+	if err != nil {
+		return nil, err
+	}
+	conn := NewConn(&packetConn{c, stunUDPAddr}, nil)
+
+	addr, err := conn.Discover()
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	conn.agent.Stop() // stop the agent's read loop, relinquishing the conn
+	return addr.(*net.UDPAddr), nil
+}
+
 func Discover(uri string) (net.PacketConn, net.Addr, error) {
 	conn, err := Dial(uri, nil)
 	if err != nil {
@@ -19,7 +39,7 @@ func Discover(uri string) (net.PacketConn, net.Addr, error) {
 		conn.Close()
 		return nil, nil, err
 	}
-	// TODO: hijack
+	conn.agent.Stop() // stop the agent's read loop
 	return conn.Conn.(net.PacketConn), addr, nil
 }
 

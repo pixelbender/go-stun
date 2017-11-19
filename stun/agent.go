@@ -62,6 +62,8 @@ type Agent struct {
 	config  *Config
 	Handler Handler
 	m       mux
+
+	stopCh chan struct{}
 }
 
 func NewAgent(config *Config) *Agent {
@@ -70,6 +72,8 @@ func NewAgent(config *Config) *Agent {
 	}
 	return &Agent{
 		config: config,
+
+		stopCh: make(chan struct{}),
 	}
 }
 
@@ -98,44 +102,69 @@ func (a *Agent) ServeConn(c net.Conn) error {
 	)
 	defer putBuffer(b)
 	for {
-		if p >= len(b) {
-			return errBufferOverflow
-		}
-		n, err := c.Read(b[p:])
-		if err != nil {
-			return err
-		}
-		p += n
-		n = 0
-		for n < p {
-			r, err := a.ServeTransport(b[n:p], c)
-			if err != nil {
+		select {
+		case <-a.stopCh:
+			// stop muxes
+			a.m.Close()
+			c.SetReadDeadline(time.Time{}) // reset read deadline
+			return nil
+		default:
+			if p >= len(b) {
+				return errBufferOverflow
+			}
+			c.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+			n, err := c.Read(b[p:])
+			if err, ok := err.(net.Error); ok && err.Timeout() {
+				continue
+			} else if err != nil {
 				return err
 			}
-			n += r
-		}
-		if n > 0 {
-			if n < p {
-				p = copy(b, b[n:p])
-			} else {
-				p = 0
+			p += n
+			n = 0
+			for n < p {
+				r, err := a.ServeTransport(b[n:p], c)
+				if err != nil {
+					return err
+				}
+				n += r
+			}
+			if n > 0 {
+				if n < p {
+					p = copy(b, b[n:p])
+				} else {
+					p = 0
+				}
 			}
 		}
 	}
 }
 
+func (a *Agent) Stop() {
+	a.stopCh <- struct{}{}
+}
+
 func (a *Agent) ServePacket(c net.PacketConn) error {
 	b := getBuffer()
 	defer putBuffer(b)
-	defer c.Close()
+	// defer c.Close()
 
 	for {
-		n, addr, err := c.ReadFrom(b)
-		if err != nil {
-			return err
-		}
-		if n > 0 {
-			a.ServeTransport(b[:n], &packetConn{c, addr})
+		select {
+		case <-a.stopCh:
+			a.m.Close()
+			c.SetReadDeadline(time.Time{}) // reset read deadline
+			return nil
+		default:
+			c.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+			n, addr, err := c.ReadFrom(b)
+			if err, ok := err.(net.Error); ok && err.Timeout() {
+				continue
+			} else if err != nil {
+				return err
+			}
+			if n > 0 {
+				a.ServeTransport(b[:n], &packetConn{c, addr})
+			}
 		}
 	}
 }
@@ -204,14 +233,17 @@ func (m *mux) serve(msg *Message, tr Transport) bool {
 	m.RUnlock()
 	if ok {
 		tx.msg, tx.from = msg, tr
-		tx.Done()
+		tx.done()
 		return true
 	}
 	return false
 }
 
 func (m *mux) newTx() *transaction {
-	tx := &transaction{id: NewTransaction()}
+	tx := &transaction{
+		doneCh: make(chan struct{}),
+		id:     NewTransaction(),
+	}
 	m.Lock()
 	if m.t == nil {
 		m.t = make(map[string]*transaction)
@@ -241,17 +273,25 @@ func (m *mux) Close() {
 }
 
 type transaction struct {
-	sync.WaitGroup
+	doneCh chan struct{}
+
 	id   []byte
 	from Transport
 	msg  *Message
 	err  error
 }
 
+func (tx *transaction) done() {
+	select {
+	case tx.doneCh <- struct{}{}:
+	default:
+		return
+	}
+}
+
 func (tx *transaction) Receive(d time.Duration) (msg *Message, from Transport, err error) {
-	tx.Add(1)
 	t := time.AfterFunc(d, tx.timeout)
-	tx.Wait()
+	<-tx.doneCh
 	t.Stop()
 	if err = tx.err; err != nil {
 		return
@@ -261,12 +301,12 @@ func (tx *transaction) Receive(d time.Duration) (msg *Message, from Transport, e
 
 func (tx *transaction) timeout() {
 	tx.err = errTimeout
-	tx.Done()
+	tx.done()
 }
 
 func (tx *transaction) Close() {
 	tx.err = errCanceled
-	tx.Done()
+	tx.done()
 }
 
 var errCanceled = errors.New("stun: transaction canceled")
