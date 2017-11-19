@@ -104,6 +104,8 @@ func (a *Agent) ServeConn(c net.Conn) error {
 	for {
 		select {
 		case <-a.stopCh:
+			// stop muxes
+			a.m.Close()
 			c.SetReadDeadline(time.Time{}) // reset read deadline
 			return nil
 		default:
